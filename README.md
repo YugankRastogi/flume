@@ -236,6 +236,50 @@ docker run flume --namespace metrics-2
 
 ---
 
+## Buffer Pool — Implementation Status (in progress)
+
+This section is a working handoff note for the lock-free buffer pool in `buffer/` (`pool.go`, `buffer.go`, `flusher.go`), tracking exactly where implementation stands so work can resume without re-deriving context.
+
+### Current design
+
+Each `buffer` cycles through three states: `stateActive -> stateReadyForFlush -> stateFlushing -> stateActive`. There is deliberately no fourth "inactive/unclaimed" state. Earlier iterations had one (a buffer sat idle until some writer raced to claim and activate it), but every claim scheme tried — an external CAS-based retirement triggered by the next window's writer, then an atomic `seqLo` lap-claim via `CompareAndSwap` — kept reintroducing the same class of bug: multiple writers racing to decide who gets to activate a given buffer, and the special-cased "buffer 0 starts pre-activated" construction defeating whichever claim mechanism was in place for that one buffer specifically.
+
+The fix was to stop treating re-activation as a writer-side race at all. The flusher already has exclusive ownership of a buffer the moment it wins `CompareAndSwap(stateReadyForFlush, stateFlushing)` — nothing else can also be mid-flush on that buffer. So re-activation (`stateFlushing -> stateActive`) is now solely the flusher's job, done once, by the one party already guaranteed exclusive access. There's no longer a moment where writers discover an unclaimed buffer and have to resolve who claims it. `stateActive` is also now the zero value of the `bufferState` enum, so every buffer (not just buffer 0) correctly starts ready to accept writes with no special-casing in `CreatePool`.
+
+`Pool.Write` is correspondingly simple now:
+```go
+switch bufferState(buf.state.Load()) {
+case stateActive:
+    return buf.write(reader)
+default: // ReadyForFlush or Flushing -- wait for the flusher to cycle it back
+    runtime.Gosched()
+}
+```
+
+### Open items (not yet implemented)
+
+1. **Nothing currently triggers `stateActive -> stateReadyForFlush`.** The old external retirement (the next window's writer CASing the previous buffer) was removed along with the claim logic, and no intrinsic fill-counter exists yet — `buffer.write` is still a stub that does nothing. This is the most urgent next step: without it, buffers never retire at all.
+
+2. **The fill-counter, when added, must only count a write once its data has actually landed — not merely once a slot is claimed.** `writeIdx`'s fetch-add marks a slot as *claimed* instantly, but the real work — reading the message out of the caller's `io.Reader` into the slot — takes real time afterward. If the counter reaching `slotCount` is read as "fully written," the flusher can start draining a slot a trailing writer is still mid-copy into. The counter must only advance (or the retire decision must only fire) after that copy has actually completed for every claimed slot.
+
+3. **`buffer.flush()`'s logic looks inverted.** Today:
+   ```go
+   func (b *buffer) flush() error {
+       if b.state.CompareAndSwap(int32(stateReadyForFlush), int32(stateFlushing)) {
+           return nil
+       }
+       defer b.state.Store(int32(stateActive))
+       return b.flusher.Flush()
+   }
+   ```
+   The CAS-success branch (the one that should mean "I'm now responsible for flushing") returns immediately without ever calling `b.flusher.Flush()`. The CAS-*failure* branch is the one that actually flushes. This needs a real fix, not just the `stateInactive -> stateActive` rename already applied to keep it compiling.
+
+4. **`idx`'s window math has an off-by-one for buffer 0's first lap.** `pool.seq.Add(1)` returns 1 on the first call, not 0, but `idx := (seq >> pool.slotShift) & bufMask` assumes window 0 spans `[0, slotCount-1]`. Since seq never equals 0, window 0 only ever gets `slotCount - 1` distinct seqs — one short — so buffer 0's first activation can never reach a fill-counter target of `slotCount` once one exists. Likely fix: `idx := ((seq - 1) >> pool.slotShift) & bufMask`.
+
+5. **Whatever resets `writeIdx` for a buffer's next activation must do so before that buffer is published as `stateActive` again.** This is an ordering rule, not a race to defend against — the flusher is the sole party doing this transition — but getting the order wrong (publish `stateActive` before `writeIdx` is back to 0) would let an eager writer observe a stale counter.
+
+---
+
 ## Name
 
 Flume — a channel that moves material fast with acceptable loss. Mining flumes traded perfect delivery for speed and volume. Same tradeoff, different century.

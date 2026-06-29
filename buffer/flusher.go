@@ -10,7 +10,7 @@ package buffer
 // Flush is expected to be called once a buffer has transitioned to
 // stateReadyForFlush and then stateFlushing, after it has stopped accepting
 // writes. Implementations
-// should drain the buffer's slots (seqLo through writeIdx) to their backing
+// should drain the buffer's slots (seqLo through readIdx) to their backing
 // store -- e.g. the flush-contract/store component -- and return any error
 // encountered so the caller can decide how to handle a failed flush (retry,
 // drop, surface to the operator, etc.) rather than Flush deciding on the

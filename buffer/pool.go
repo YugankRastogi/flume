@@ -1,6 +1,7 @@
 package buffer
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math/bits"
@@ -62,7 +63,10 @@ func (pool *Pool) Write(reader io.Reader) error {
 	for {
 		switch bufferState(buf.state.Load()) {
 		case stateActive:
-			return buf.write(reader)
+			err := buf.write(reader, seq)
+			if errors.Is(err, ErrSlotClaimFailed) {
+				runtime.Gosched()
+			}
 		default:
 			runtime.Gosched()
 		}
@@ -109,13 +113,15 @@ func CreatePool(bufferDetails uint64, bufferID int64) (*Pool, error) {
 		return nil, fmt.Errorf("slot size must be non-zero")
 	}
 
+	ringSize := poolSize * slotCount
+
 	buffers := make([]*buffer, poolSize)
 	for i := range buffers {
 		slots := make([]slot, slotCount)
 		for j := range slots {
 			slots[j].buf = make([]byte, slotSize)
 		}
-		buffers[i] = &buffer{slots: slots}
+		buffers[i] = &buffer{slots: slots, ringSize: ringSize}
 	}
 	// Every buffer defaults to stateActive (the atomic Int32 zero value),
 	// which is exactly the bufferState each one should start in.

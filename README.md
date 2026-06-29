@@ -260,7 +260,7 @@ default: // ReadyForFlush or Flushing -- wait for the flusher to cycle it back
 
 1. **Nothing currently triggers `stateActive -> stateReadyForFlush`.** The old external retirement (the next window's writer CASing the previous buffer) was removed along with the claim logic, and no intrinsic fill-counter exists yet — `buffer.write` is still a stub that does nothing. This is the most urgent next step: without it, buffers never retire at all.
 
-2. **The fill-counter, when added, must only count a write once its data has actually landed — not merely once a slot is claimed.** `writeIdx`'s fetch-add marks a slot as *claimed* instantly, but the real work — reading the message out of the caller's `io.Reader` into the slot — takes real time afterward. If the counter reaching `slotCount` is read as "fully written," the flusher can start draining a slot a trailing writer is still mid-copy into. The counter must only advance (or the retire decision must only fire) after that copy has actually completed for every claimed slot.
+2. **The fill-counter, when added, must only count a write once its data has actually landed — not merely once a slot is claimed.** `readIdx`'s fetch-add marks a slot as *claimed* instantly, but the real work — reading the message out of the caller's `io.Reader` into the slot — takes real time afterward. If the counter reaching `slotCount` is read as "fully written," the flusher can start draining a slot a trailing writer is still mid-copy into. The counter must only advance (or the retire decision must only fire) after that copy has actually completed for every claimed slot.
 
 3. **`buffer.flush()`'s logic looks inverted.** Today:
    ```go
@@ -276,7 +276,7 @@ default: // ReadyForFlush or Flushing -- wait for the flusher to cycle it back
 
 4. **`idx`'s window math has an off-by-one for buffer 0's first lap.** `pool.seq.Add(1)` returns 1 on the first call, not 0, but `idx := (seq >> pool.slotShift) & bufMask` assumes window 0 spans `[0, slotCount-1]`. Since seq never equals 0, window 0 only ever gets `slotCount - 1` distinct seqs — one short — so buffer 0's first activation can never reach a fill-counter target of `slotCount` once one exists. Likely fix: `idx := ((seq - 1) >> pool.slotShift) & bufMask`.
 
-5. **Whatever resets `writeIdx` for a buffer's next activation must do so before that buffer is published as `stateActive` again.** This is an ordering rule, not a race to defend against — the flusher is the sole party doing this transition — but getting the order wrong (publish `stateActive` before `writeIdx` is back to 0) would let an eager writer observe a stale counter.
+5. **Whatever resets `readIdx` for a buffer's next activation must do so before that buffer is published as `stateActive` again.** This is an ordering rule, not a race to defend against — the flusher is the sole party doing this transition — but getting the order wrong (publish `stateActive` before `readIdx` is back to 0) would let an eager writer observe a stale counter.
 
 ---
 

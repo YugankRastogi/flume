@@ -206,6 +206,76 @@ func BenchmarkPoolThroughput(b *testing.B) {
 	}
 }
 
+// BenchmarkPoolParallelWriteRead benchmarks write and read throughput when
+// dedicated writer goroutines and reader goroutines run simultaneously.
+// Half of GOMAXPROCS goroutines write; the other half read.
+// Ring: poolSize=8, slotCount=32, ringSize=256.
+// Peak memory per pool: 256 * 16 KB = 4 MB.
+func BenchmarkPoolParallelWriteRead(b *testing.B) {
+	cases := []struct {
+		name   string
+		slotSz uint64
+	}{
+		{"slot=64B", 64},
+		{"slot=256B", 256},
+		{"slot=1KB", 1024},
+		{"slot=4KB", 4096},
+		{"slot=16KB", 16384},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &DummyFlusher{})
+			if err != nil {
+				b.Fatalf("CreatePool: %v", err)
+			}
+
+			payload := bytes.Repeat([]byte("x"), int(tc.slotSz/2))
+			b.ResetTimer()
+			b.SetBytes(int64(len(payload)))
+
+			nProcs := runtime.GOMAXPROCS(0)
+			nWriters := max(nProcs/2, 1)
+			nReaders := nProcs - nWriters
+
+			ops := b.N
+			writerOps := ops / 2
+			readerOps := ops - writerOps
+
+			var wg sync.WaitGroup
+
+			for range nWriters {
+				wg.Go(func() {
+					r := bytes.NewReader(payload)
+					perGoroutine := writerOps / nWriters
+					for range perGoroutine {
+						r.Reset(payload)
+						if err := pool.Write(r); err != nil {
+							b.Error(err)
+							return
+						}
+					}
+				})
+			}
+
+			for range nReaders {
+				wg.Go(func() {
+					readBuf := make([]byte, tc.slotSz)
+					perGoroutine := readerOps / nReaders
+					for range perGoroutine {
+						if _, err := pool.Read(readBuf); err != nil {
+							b.Error(err)
+							return
+						}
+					}
+				})
+			}
+
+			wg.Wait()
+		})
+	}
+}
+
 // BenchmarkPoolConcurrentThroughput benchmarks write+read throughput across
 // GOMAXPROCS goroutines for various slot sizes.
 // Ring: poolSize=8, slotCount=32, ringSize=256.

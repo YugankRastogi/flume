@@ -1,3 +1,4 @@
+[WIP]
 # Flume
 
 A fast, embeddable pub/sub message buffer for Go that trades Kafka's durability guarantees for raw speed. Designed for use cases where eventual consistency is acceptable and operational simplicity matters.

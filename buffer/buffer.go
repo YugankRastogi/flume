@@ -5,10 +5,11 @@ import (
 	"io"
 	"sync/atomic"
 
+	"github.com/yugank/flume/flusher"
 	"golang.org/x/sys/cpu"
 )
 
-// bufferState tracks where a buffer is in its lifecycle within the Pool.
+// bufferState tracks where a Buffer is in its lifecycle within the Pool.
 type bufferState int32
 
 const (
@@ -17,9 +18,9 @@ const (
 	stateFlushing                         // handed off to its Flusher, being written to the store
 )
 
-// slot holds a single message. buf is pre-allocated to MESSAGE_CAP bytes once,
-// at buffer construction, and reused for the life of the process — this is what
-// gives the write path its "no GC pressure" property.
+// slot holds a single message. buf is pre-allocated to slotSize bytes once,
+// at buffer construction, and reused for the life of the process — this is
+// what gives the write path its "no GC pressure" property.
 type slot struct {
 	// seq is this slot's claim marker, not the message's global sequence
 	// number. A writer for global sequence s may only claim this slot by
@@ -30,13 +31,13 @@ type slot struct {
 	// expected-old and only one can ever win. Closing the gap from
 	// s-ringSize+1 up to s is done by a later retire-after-flush step.
 	seq atomic.Uint64
-	n   atomic.Uint32 // bytes actually written into buf (<= MESSAGE_CAP); 0 means unwritten
-	buf []byte        // fixed-capacity backing array, len == MESSAGE_CAP
+	n   atomic.Uint32 // bytes actually written into buf (<= slotSize); 0 means unwritten
+	buf []byte        // fixed-capacity backing array, len == slotSize
 }
 
-// buffer is one fixed-size slab in the Pool. Exactly one buffer is "active"
+// Buffer is one fixed-size slab in the Pool. Exactly one Buffer is "active"
 // (accepting writes) at a time; the rest are either free or mid-flush.
-type buffer struct {
+type Buffer struct {
 	// readCount is bumped via a single atomic fetch-and-add per read — once a
 	// slot's data has been consumed by the caller and the read CAS chain has
 	// completed. It is a consumption counter, not a fill counter: it tracks
@@ -47,12 +48,12 @@ type buffer struct {
 	readCount atomic.Uint32
 	_         cpu.CacheLinePad
 
-	slots []slot // len == BUFFER_SIZE, allocated once and never resized
+	slots []slot // len == slotCount, allocated once and never resized
 
 	// ringSize is the total capacity of the whole Pool (poolSize*slotCount),
-	// set once at construction in CreatePool. A given slot in this buffer is
-	// only revisited once every ringSize global sequence numbers, so write
-	// uses it to compute the claim CAS's expected-old/new operands.
+	// set once at construction in New. A given slot in this buffer is only
+	// revisited once every ringSize global sequence numbers, so Write uses it
+	// to compute the claim CAS's expected-old/new operands.
 	ringSize uint64
 
 	// state is the current bufferState (stateActive/stateReadyForFlush/
@@ -60,16 +61,30 @@ type buffer struct {
 	// writer goroutines and the flush goroutine concurrently.
 	state atomic.Int32
 
-	// flusher is this buffer's hook for draining itself once retired. It's a
-	// placeholder field for now -- nothing constructs a buffer with one set
-	// yet -- but the extension point is in place here, per-buffer, rather
-	// than on Pool, so each buffer can be wired to its own flush destination
-	// (e.g. the flush-contract/store component) without Pool needing to know
-	// about it.
-	flusher Flusher
+	// sink is this buffer's hook for draining itself once retired. It is
+	// stored per-buffer rather than on Pool so each buffer can be wired to
+	// its own flush destination without Pool needing to know about it.
+	sink flusher.Flusher
 }
 
-func (b *buffer) write(reader io.Reader, seq uint64) error {
+// New allocates a Buffer with slotCount slots of slotSize bytes each,
+// belonging to a ring of ringSize total slots. baseSeq is the initial
+// sequence value for slot 0 of this buffer (i.e. bufferIndex * slotCount).
+func New(slotCount, slotSize, ringSize, baseSeq uint64, f flusher.Flusher) *Buffer {
+	slots := make([]slot, slotCount)
+	for j := range slots {
+		slots[j].buf = make([]byte, slotSize)
+		slots[j].seq.Store(baseSeq + uint64(j))
+	}
+	return &Buffer{slots: slots, ringSize: ringSize, sink: f}
+}
+
+// IsActive reports whether this buffer is currently accepting writes.
+func (b *Buffer) IsActive() bool {
+	return bufferState(b.state.Load()) == stateActive
+}
+
+func (b *Buffer) Write(reader io.Reader, seq uint64) error {
 	idx := seq & (uint64(len(b.slots)) - 1)
 	s := &b.slots[idx]
 
@@ -93,7 +108,7 @@ func (b *buffer) write(reader io.Reader, seq uint64) error {
 	return nil
 }
 
-func (b *buffer) read(seq uint64, readArr []byte) (uint32, error) {
+func (b *Buffer) Read(seq uint64, readArr []byte) (uint32, error) {
 	idx := seq & (uint64(len(b.slots)) - 1)
 	s := &b.slots[idx]
 
@@ -118,8 +133,7 @@ func (b *buffer) read(seq uint64, readArr []byte) (uint32, error) {
 	return n, nil
 }
 
-// flush is an internal implementation detail and any changes made to this should be handled by external flush function.
-func (b *buffer) flush() error {
+func (b *Buffer) flush() error {
 	if !b.state.CompareAndSwap(int32(stateReadyForFlush), int32(stateFlushing)) {
 		panic("flush called without correct state")
 	}
@@ -136,8 +150,7 @@ func (b *buffer) flush() error {
 		if !b.state.CompareAndSwap(int32(stateFlushing), int32(stateActive)) {
 			panic("unexpected state encountered during flushing")
 		}
-
 	}()
 
-	return b.flusher.Flush()
+	return b.sink.Flush()
 }

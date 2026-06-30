@@ -239,28 +239,53 @@ docker run flume --namespace metrics-2
 
 ## Benchmarks
 
-Measured on Apple M4 (arm64, 10 cores), Go 1.26, `GOMAXPROCS=10`.  
-`BenchmarkPoolParallelWriteRead`: 5 dedicated writer goroutines and 5 dedicated reader goroutines run simultaneously (writes and reads in parallel, not serialised per goroutine). 0 B/op, 0 allocs/op across all cases.
+`BenchmarkPoolParallelWriteRead`: dedicated writer goroutines and reader goroutines run simultaneously (writes and reads in parallel, not serialised per goroutine). 0 B/op, 0 allocs/op across all cases.
+
+### Apple M4 — bare metal (arm64, 10 cores), Go 1.26, `GOMAXPROCS=10`
+
+1 writer goroutine per 2 cores — 5 writers, 5 readers running concurrently.
 
 ```
 BenchmarkPoolParallelWriteRead/slot=64B-10      12576715     95.38 ns/op     335.49 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=64B-10      11321190    100.2  ns/op     319.40 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=64B-10      12068544    101.0  ns/op     316.81 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=256B-10     10224723    104.4  ns/op    1225.53 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=64B-10      11321190    100.20 ns/op     319.40 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=64B-10      12068544    101.00 ns/op     316.81 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=256B-10     10224723    104.40 ns/op    1225.53 MB/s    0 B/op    0 allocs/op
 BenchmarkPoolParallelWriteRead/slot=256B-10     12100560     97.72 ns/op    1309.91 MB/s    0 B/op    0 allocs/op
 BenchmarkPoolParallelWriteRead/slot=256B-10     12718404     97.87 ns/op    1307.89 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=1KB-10      11650956    102.9  ns/op    4974.48 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=1KB-10      11877733    106.1  ns/op    4826.15 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=1KB-10      11568578    101.8  ns/op    5028.24 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=4KB-10      10112046    119.5  ns/op   17131.80 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=4KB-10       9895111    123.2  ns/op   16617.82 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=4KB-10       9843252    119.2  ns/op   17183.80 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=16KB-10      5980168    201.7  ns/op   40620.13 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=16KB-10      6119926    202.4  ns/op   40477.41 MB/s    0 B/op    0 allocs/op
-BenchmarkPoolParallelWriteRead/slot=16KB-10      6076501    201.0  ns/op   40749.07 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=1KB-10      11650956    102.90 ns/op    4974.48 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=1KB-10      11877733    106.10 ns/op    4826.15 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=1KB-10      11568578    101.80 ns/op    5028.24 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=4KB-10      10112046    119.50 ns/op   17131.80 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=4KB-10       9895111    123.20 ns/op   16617.82 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=4KB-10       9843252    119.20 ns/op   17183.80 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=16KB-10      5980168    201.70 ns/op   40620.13 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=16KB-10      6119926    202.40 ns/op   40477.41 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=16KB-10      6076501    201.00 ns/op   40749.07 MB/s    0 B/op    0 allocs/op
 ```
 
-Latency is flat at ~95–120 ns/op from 64B through 4KB slots under true parallel write/read contention; throughput scales linearly with slot size. The 16KB case rises to ~200 ns as the payload exceeds L1/L2, while sustaining ~40 GB/s aggregate.
+### Docker on Apple M4 (arm64), Go 1.26, `GOMAXPROCS=2`, `--cpus=2.0`, `--memory=1g`, `--memory-swap=1g`
+
+1 writer goroutine, 1 reader goroutine running concurrently.
+
+```
+BenchmarkPoolParallelWriteRead/slot=64B-2     335801712     34.74 ns/op     921.15 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=64B-2     366691089     31.99 ns/op    1000.33 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=64B-2     487793988     31.29 ns/op    1022.53 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=256B-2    348042902     32.92 ns/op    3888.30 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=256B-2    369447681     32.81 ns/op    3901.32 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=256B-2    352809226     32.34 ns/op    3958.39 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=1KB-2     264769341     42.90 ns/op   11933.97 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=1KB-2     223474969     45.64 ns/op   11217.19 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=1KB-2     252087400     45.33 ns/op   11294.22 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=4KB-2     120227332    105.80 ns/op   19349.65 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=4KB-2     100000000    107.70 ns/op   19015.61 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=4KB-2     100000000    101.20 ns/op   20243.26 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=16KB-2     43026848    268.40 ns/op   30523.22 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=16KB-2     42210895    271.80 ns/op   30140.61 MB/s    0 B/op    0 allocs/op
+BenchmarkPoolParallelWriteRead/slot=16KB-2     41751082    274.30 ns/op   29865.65 MB/s    0 B/op    0 allocs/op
+```
+
+Latency under constrained 2-CPU Docker is ~32–46 ns/op for sub-4KB slots — faster per-op than the 10-core run due to lower contention with only 1 writer and 1 reader. The 16KB case rises to ~270 ns as the payload exceeds cache. Throughput peaks at ~20 GB/s at 4KB and ~30 GB/s at 16KB.
 
 ---
 

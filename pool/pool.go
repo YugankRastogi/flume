@@ -1,4 +1,4 @@
-package buffer
+package pool
 
 import (
 	"errors"
@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sync/atomic"
 
+	"github.com/yugank/flume/buffer"
+	"github.com/yugank/flume/flusher"
 	"golang.org/x/sys/cpu"
 )
 
@@ -24,7 +26,7 @@ const (
 	slotSizeMask  = uint64(1<<slotSizeBits) - 1
 )
 
-// Pool owns a fixed ring of pre-allocated buffers (BUFFER_COUNT, sized at
+// Pool owns a fixed ring of pre-allocated buffers (poolSize, sized at
 // construction). Buffer rotation -- which buffer is currently active, and
 // when a retired buffer is safe to reuse -- is being redesigned around a
 // head/tail cursor pair instead of an atomic active pointer plus a
@@ -32,7 +34,7 @@ const (
 // (and therefore no channel-internal mutex) involved. Those cursor fields
 // are intentionally not added yet.
 type Pool struct {
-	buffers []*buffer // len == BUFFER_COUNT, all pre-allocated up front, never reallocated
+	buffers []*buffer.Buffer // len == poolSize, all pre-allocated up front, never reallocated
 
 	_ cpu.CacheLinePad
 	// seq is the global monotonic sequence counter for this Pool (i.e. this
@@ -67,18 +69,15 @@ func (pool *Pool) Write(reader io.Reader) error {
 	buf := pool.buffers[idx]
 
 	for {
-		switch bufferState(buf.state.Load()) {
-		case stateActive:
-			err := buf.write(reader, seq)
-			if errors.Is(err, ErrSlotClaimFailed) {
+		if buf.IsActive() {
+			err := buf.Write(reader, seq)
+			if errors.Is(err, buffer.ErrSlotClaimFailed) {
 				runtime.Gosched()
 				continue
 			}
-
 			return err
-		default:
-			runtime.Gosched()
 		}
+		runtime.Gosched()
 	}
 }
 
@@ -89,18 +88,15 @@ func (pool *Pool) Read(arr []byte) (uint32, error) {
 	buf := pool.buffers[idx]
 
 	for {
-		switch bufferState(buf.state.Load()) {
-		case stateActive:
-			res, err := buf.read(seq, arr)
-			if errors.Is(err, ErrSlotClaimFailed) {
+		if buf.IsActive() {
+			res, err := buf.Read(seq, arr)
+			if errors.Is(err, buffer.ErrSlotClaimFailed) {
 				runtime.Gosched()
 				continue
 			}
-
 			return res, err
-		default:
-			runtime.Gosched()
 		}
+		runtime.Gosched()
 	}
 }
 
@@ -127,7 +123,7 @@ func (pool *Pool) Read(arr []byte) (uint32, error) {
 // the smallest valid size.
 //
 // bufferID is reserved for future use and not yet interpreted.
-func CreatePool(bufferDetails uint64, bufferID int64, flusher Flusher) (*Pool, error) {
+func CreatePool(bufferDetails uint64, bufferID int64, f flusher.Flusher) (*Pool, error) {
 	poolSize := fieldCeiling(bufferDetails&poolSizeMask, poolSizeBits, "pool size")
 	if poolSize == 0 {
 		poolSize = 1
@@ -146,19 +142,14 @@ func CreatePool(bufferDetails uint64, bufferID int64, flusher Flusher) (*Pool, e
 
 	ringSize := poolSize * slotCount
 
-	buffers := make([]*buffer, poolSize)
+	buffers := make([]*buffer.Buffer, poolSize)
 	for i := range buffers {
-		slots := make([]slot, slotCount)
-		for j := range slots {
-			slots[j].buf = make([]byte, slotSize)
-			slots[j].seq.Store(uint64(i)*slotCount + uint64(j))
-		}
-		buffers[i] = &buffer{slots: slots, ringSize: ringSize, flusher: flusher}
+		buffers[i] = buffer.New(slotCount, slotSize, ringSize, uint64(i)*slotCount, f)
 	}
 	// Every buffer defaults to stateActive (the atomic Int32 zero value),
 	// which is exactly the bufferState each one should start in.
 
-	pool := &Pool{
+	p := &Pool{
 		buffers:   buffers,
 		poolSize:  uint16(poolSize),
 		slotCount: uint16(slotCount),
@@ -166,10 +157,10 @@ func CreatePool(bufferDetails uint64, bufferID int64, flusher Flusher) (*Pool, e
 		slotShift: slotShift,
 	}
 
-	pool.seq.Store(ringSize - 1)
-	pool.readSeq.Store(ringSize - 1)
+	p.seq.Store(ringSize - 1)
+	p.readSeq.Store(ringSize - 1)
 
-	return pool, nil
+	return p, nil
 }
 
 // fieldCeiling rounds x down to the nearest power of two -- the value of its
@@ -181,7 +172,7 @@ func CreatePool(bufferDetails uint64, bufferID int64, flusher Flusher) (*Pool, e
 func fieldCeiling(x uint64, fieldBits int, name string) uint64 {
 	topBit := uint64(1) << (fieldBits - 1)
 	if x&topBit != 0 {
-		panic(fmt.Sprintf("buffer: %s has its max sentinel bit set (bit %d) -- refusing to size a pool that large", name, fieldBits))
+		panic(fmt.Sprintf("pool: %s has its max sentinel bit set (bit %d) -- refusing to size a pool that large", name, fieldBits))
 	}
 	if x == 0 {
 		return 0

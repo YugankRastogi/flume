@@ -16,4 +16,4 @@ CMD ["sh", "-c", \
        -benchtime=${BENCHTIME:-10s} \
        -count=${COUNT:-3} \
        -run=^$ \
-       ./buffer/"]
+       ${PKG:-./buffer/}"]

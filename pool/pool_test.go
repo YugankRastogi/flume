@@ -1,4 +1,4 @@
-package buffer
+package pool
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/yugank/flume/flusher"
 )
 
 // encodeDetails packs (poolSize, slotCount, slotSize) into the uint64 that
@@ -16,7 +18,7 @@ func encodeDetails(poolSize, slotCount, slotSize uint64) uint64 {
 
 func mustCreatePool(tb testing.TB, poolSize, slotCount, slotSize uint64) *Pool {
 	tb.Helper()
-	pool, err := CreatePool(encodeDetails(poolSize, slotCount, slotSize), 0, &DummyFlusher{})
+	pool, err := CreatePool(encodeDetails(poolSize, slotCount, slotSize), 0, &flusher.DummyFlusher{})
 	if err != nil {
 		tb.Fatalf("CreatePool: %v", err)
 	}
@@ -181,7 +183,7 @@ func BenchmarkPoolThroughput(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &DummyFlusher{})
+			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &flusher.DummyFlusher{})
 			if err != nil {
 				b.Fatalf("CreatePool: %v", err)
 			}
@@ -225,7 +227,7 @@ func BenchmarkPoolParallelWriteRead(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &DummyFlusher{})
+			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &flusher.DummyFlusher{})
 			if err != nil {
 				b.Fatalf("CreatePool: %v", err)
 			}
@@ -239,8 +241,8 @@ func BenchmarkPoolParallelWriteRead(b *testing.B) {
 			nReaders := nProcs - nWriters
 
 			ops := b.N
-			writerOps := ops / 2
-			readerOps := ops - writerOps
+			readerOps := max(ops/2, 1)
+			writerOps := max(ops-readerOps, 1)
 
 			var wg sync.WaitGroup
 
@@ -294,7 +296,7 @@ func BenchmarkPoolConcurrentThroughput(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &DummyFlusher{})
+			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &flusher.DummyFlusher{})
 			if err != nil {
 				b.Fatalf("CreatePool: %v", err)
 			}

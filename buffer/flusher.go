@@ -22,3 +22,9 @@ package buffer
 type Flusher interface {
 	Flush() error
 }
+
+type DummyFlusher struct{}
+
+func (df *DummyFlusher) Flush() error {
+	return nil
+}

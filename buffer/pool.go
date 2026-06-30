@@ -7,6 +7,8 @@ import (
 	"math/bits"
 	"runtime"
 	"sync/atomic"
+
+	"golang.org/x/sys/cpu"
 )
 
 const (
@@ -32,10 +34,14 @@ const (
 type Pool struct {
 	buffers []*buffer // len == BUFFER_COUNT, all pre-allocated up front, never reallocated
 
+	_ cpu.CacheLinePad
 	// seq is the global monotonic sequence counter for this Pool (i.e. this
 	// writer instance). Incremented once per successful Write, independent
 	// of which Buffer the message lands in.
-	seq atomic.Uint64
+	seq     atomic.Uint64
+	_       cpu.CacheLinePad
+	readSeq atomic.Uint64
+	_       cpu.CacheLinePad
 
 	// poolSize is the number of buffers in the pool (decoded from a 10-bit
 	// field, so it fits uint16). slotCount is the number of slots per buffer
@@ -66,7 +72,32 @@ func (pool *Pool) Write(reader io.Reader) error {
 			err := buf.write(reader, seq)
 			if errors.Is(err, ErrSlotClaimFailed) {
 				runtime.Gosched()
+				continue
 			}
+
+			return err
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func (pool *Pool) Read(arr []byte) (uint32, error) {
+	seq := pool.readSeq.Add(1)
+	bufMask := uint64(pool.poolSize) - 1
+	idx := (seq >> pool.slotShift) & bufMask
+	buf := pool.buffers[idx]
+
+	for {
+		switch bufferState(buf.state.Load()) {
+		case stateActive:
+			res, err := buf.read(seq, arr)
+			if errors.Is(err, ErrSlotClaimFailed) {
+				runtime.Gosched()
+				continue
+			}
+
+			return res, err
 		default:
 			runtime.Gosched()
 		}
@@ -96,7 +127,7 @@ func (pool *Pool) Write(reader io.Reader) error {
 // the smallest valid size.
 //
 // bufferID is reserved for future use and not yet interpreted.
-func CreatePool(bufferDetails uint64, bufferID int64) (*Pool, error) {
+func CreatePool(bufferDetails uint64, bufferID int64, flusher Flusher) (*Pool, error) {
 	poolSize := fieldCeiling(bufferDetails&poolSizeMask, poolSizeBits, "pool size")
 	if poolSize == 0 {
 		poolSize = 1
@@ -120,19 +151,25 @@ func CreatePool(bufferDetails uint64, bufferID int64) (*Pool, error) {
 		slots := make([]slot, slotCount)
 		for j := range slots {
 			slots[j].buf = make([]byte, slotSize)
+			slots[j].seq.Store(uint64(i)*slotCount + uint64(j))
 		}
-		buffers[i] = &buffer{slots: slots, ringSize: ringSize}
+		buffers[i] = &buffer{slots: slots, ringSize: ringSize, flusher: flusher}
 	}
 	// Every buffer defaults to stateActive (the atomic Int32 zero value),
 	// which is exactly the bufferState each one should start in.
 
-	return &Pool{
+	pool := &Pool{
 		buffers:   buffers,
 		poolSize:  uint16(poolSize),
 		slotCount: uint16(slotCount),
 		slotSize:  uint32(slotSize),
 		slotShift: slotShift,
-	}, nil
+	}
+
+	pool.seq.Store(ringSize - 1)
+	pool.readSeq.Store(ringSize - 1)
+
+	return pool, nil
 }
 
 // fieldCeiling rounds x down to the nearest power of two -- the value of its

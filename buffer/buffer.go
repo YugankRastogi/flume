@@ -1,8 +1,11 @@
 package buffer
 
 import (
+	"fmt"
 	"io"
 	"sync/atomic"
+
+	"golang.org/x/sys/cpu"
 )
 
 // bufferState tracks where a buffer is in its lifecycle within the Pool.
@@ -27,35 +30,24 @@ type slot struct {
 	// expected-old and only one can ever win. Closing the gap from
 	// s-ringSize+1 up to s is done by a later retire-after-flush step.
 	seq atomic.Uint64
-	n   uint32 // bytes actually written into buf (<= MESSAGE_CAP); 0 means unwritten
-	buf []byte // fixed-capacity backing array, len == MESSAGE_CAP
+	n   atomic.Uint32 // bytes actually written into buf (<= MESSAGE_CAP); 0 means unwritten
+	buf []byte        // fixed-capacity backing array, len == MESSAGE_CAP
 }
 
 // buffer is one fixed-size slab in the Pool. Exactly one buffer is "active"
 // (accepting writes) at a time; the rest are either free or mid-flush.
 type buffer struct {
+	// readCount is bumped via a single atomic fetch-and-add per read — once a
+	// slot's data has been consumed by the caller and the read CAS chain has
+	// completed. It is a consumption counter, not a fill counter: it tracks
+	// how many slots have been fully drained in this activation, not how many
+	// have been written. Once it reaches len(slots), all slots have been read
+	// and the buffer is ready to flush. It is reset to 0 by the flush path
+	// before the buffer transitions back to stateActive.
+	readCount atomic.Uint32
+	_         cpu.CacheLinePad
+
 	slots []slot // len == BUFFER_SIZE, allocated once and never resized
-
-	// readIdx is bumped via a single atomic fetch-and-add per write — the
-	// only synchronization on the write hot path. It is only advanced once a
-	// slot's read from the caller's io.Reader has completed, not merely
-	// claimed, since the fill-counter must track data that has actually
-	// landed. It only ever increases for a given activation; once it exceeds
-	// len(slots), the buffer is full and callers must trigger a swap to the
-	// next buffer.
-	// This readIdx is cyclic so essentially after hitting the required number of slots
-	// it turns back on itself.
-	readIdx atomic.Uint32
-
-	// seqLo is the sequence number of slots[0] for the current activation.
-	// Combined with readIdx, it gives the seq range this buffer covers.
-	// Only written by the single goroutine performing the swap, before the
-	// buffer is published as active — so no atomic is needed for it.
-	//
-	// Not used for slot indexing in write -- that's now derived purely from
-	// seq and ringSize. Retained for flush-time bookkeeping of a buffer's
-	// seq range.
-	seqLo uint64
 
 	// ringSize is the total capacity of the whole Pool (poolSize*slotCount),
 	// set once at construction in CreatePool. A given slot in this buffer is
@@ -91,21 +83,61 @@ func (b *buffer) write(reader io.Reader, seq uint64) error {
 	if err != nil && err != io.EOF {
 		return err
 	}
-	s.n = uint32(n)
+	s.n.Store(uint32(n))
+
+	readyForRead := expectedNew + 1
+	if !s.seq.CompareAndSwap(expectedNew, readyForRead) {
+		return ErrSlotClaimFailed
+	}
 
 	return nil
 }
 
-func (b *buffer) read(seq uint64) error {
-	b.readIdx.Add(1)
-	return nil
+func (b *buffer) read(seq uint64, readArr []byte) (uint32, error) {
+	idx := seq & (uint64(len(b.slots)) - 1)
+	s := &b.slots[idx]
+
+	expectedOld := (seq - b.ringSize) + 2
+	expectedNew := expectedOld + 1
+	if !s.seq.CompareAndSwap(expectedOld, expectedNew) {
+		return 0, ErrSlotClaimFailed
+	}
+	copy(readArr, s.buf)
+
+	n := s.n.Load()
+	// Use the Add return value directly so only the goroutine that bumps
+	// readCount to exactly len(slots) triggers the flush. A separate Load()
+	// would let two goroutines racing on the last slot both see the threshold
+	// and spawn two flush goroutines.
+	if b.readCount.Add(1) == uint32(len(b.slots)) {
+		if b.state.CompareAndSwap(int32(stateActive), int32(stateReadyForFlush)) {
+			go b.flush()
+		}
+	}
+
+	return n, nil
 }
 
 // flush is an internal implementation detail and any changes made to this should be handled by external flush function.
 func (b *buffer) flush() error {
-	if b.state.CompareAndSwap(int32(stateReadyForFlush), int32(stateFlushing)) {
-		return nil
+	if !b.state.CompareAndSwap(int32(stateReadyForFlush), int32(stateFlushing)) {
+		panic("flush called without correct state")
 	}
-	defer b.state.Store(int32(stateActive))
+	defer func() {
+		for i := range b.slots {
+			b.slots[i].seq.Add(uint64(b.ringSize - 3))
+			clear(b.slots[i].buf[:b.slots[i].n.Load()])
+		}
+		actual := b.readCount.Load()
+		if !b.readCount.CompareAndSwap(uint32(len(b.slots)), 0) {
+			panic(fmt.Sprintf("unexpected number of slots encountered after flushing: got %d, want %d", actual, len(b.slots)))
+		}
+
+		if !b.state.CompareAndSwap(int32(stateFlushing), int32(stateActive)) {
+			panic("unexpected state encountered during flushing")
+		}
+
+	}()
+
 	return b.flusher.Flush()
 }

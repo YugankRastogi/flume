@@ -1,0 +1,13 @@
+syntax = "proto3";
+package flume;
+option go_package = "github.com/yugank/flume/proto";
+
+service Flume {
+  rpc Write(WriteRequest)  returns (WriteResponse);
+  rpc Read(ReadRequest)    returns (ReadResponse);
+}
+
+message WriteRequest  { bytes data = 1; }
+message WriteResponse {}
+message ReadRequest   {}
+message ReadResponse  { bytes data = 1; }

@@ -7,6 +7,7 @@ import (
 	"math/bits"
 	"runtime"
 	"sync/atomic"
+	"time"
 
 	"github.com/yugank/flume/buffer"
 	"github.com/yugank/flume/flusher"
@@ -68,14 +69,23 @@ func (pool *Pool) Write(reader io.Reader) error {
 	idx := (seq >> pool.slotShift) & bufMask
 	buf := pool.buffers[idx]
 
+	var count int
 	for {
 		if buf.IsActive() {
 			err := buf.Write(reader, seq)
 			if errors.Is(err, buffer.ErrSlotClaimFailed) {
+				count++
+				if count > 4 {
+					time.Sleep(time.Microsecond * 10)
+				}
 				runtime.Gosched()
 				continue
 			}
 			return err
+		}
+		count++
+		if count > 4 {
+			time.Sleep(time.Microsecond * 10)
 		}
 		runtime.Gosched()
 	}
@@ -87,14 +97,23 @@ func (pool *Pool) Read(arr []byte) (uint32, error) {
 	idx := (seq >> pool.slotShift) & bufMask
 	buf := pool.buffers[idx]
 
+	var count int
 	for {
 		if buf.IsActive() {
 			res, err := buf.Read(seq, arr)
 			if errors.Is(err, buffer.ErrSlotClaimFailed) {
+				count++
+				if count > 4 {
+					time.Sleep(time.Microsecond * 10)
+				}
 				runtime.Gosched()
 				continue
 			}
 			return res, err
+		}
+		count++
+		if count > 4 {
+			time.Sleep(time.Microsecond * 10)
 		}
 		runtime.Gosched()
 	}
@@ -162,6 +181,8 @@ func CreatePool(bufferDetails uint64, bufferID int64, f flusher.Flusher) (*Pool,
 
 	return p, nil
 }
+
+func (pool *Pool) SlotSize() uint32 { return pool.slotSize }
 
 // fieldCeiling rounds x down to the nearest power of two -- the value of its
 // highest set bit, or 0 if x is 0 -- within a fieldBits-wide field, with one

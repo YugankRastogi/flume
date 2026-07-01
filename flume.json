@@ -1,0 +1,7 @@
+{
+  "pool_size": 128,
+  "slot_count": 32,
+  "slot_size": 131072,
+  "max_writers": 64,
+  "max_readers": 64
+}

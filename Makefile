@@ -11,6 +11,8 @@ SERVER_IMAGE   ?= flume-server
 SERVER_NAME    ?= flume-server
 GRPC_ADDR      ?= localhost:50051
 TCP_ADDR       ?= localhost:50051
+UNIX_SOCK_DIR  ?= /tmp/flume-bench
+UNIX_SOCK_PATH ?= $(UNIX_SOCK_DIR)/flume.sock
 POOL_SIZE      ?= 128
 SLOT_COUNT     ?= 32
 SLOT_SIZE      ?= 131072
@@ -25,7 +27,9 @@ BENCH_WARMUP_DUR ?= 2s
         bench-grpc-server-build bench-grpc-server-up bench-grpc-server-down \
         bench-grpc-run bench-grpc \
         bench-tcp-server-up bench-tcp-server-down bench-tcp-run bench-tcp \
-        bench-decoupled-run bench-decoupled
+        bench-decoupled-run bench-decoupled \
+        bench-unix-server-up bench-unix-server-down bench-unix-run bench-unix \
+        bench-decoupled-unix
 
 bench-docker-build:
 	docker build -t $(IMAGE) .
@@ -163,6 +167,64 @@ bench-decoupled: bench-tcp-server-up
 	go run ./cmd/bench-decoupled \
 		-network=tcp \
 		-addr=$(TCP_ADDR) \
+		-write-conc=$(BENCH_CONC) \
+		-read-conc=$(BENCH_CONC) \
+		-ops=$(BENCH_OPS) \
+		-payload=$(BENCH_PAYLOAD) \
+		-warmup-dur=$(BENCH_WARMUP_DUR) \
+		-read-buf=$(SLOT_SIZE); \
+	EXIT=$$?; \
+	docker stop $(SERVER_NAME); docker rm $(SERVER_NAME); \
+	exit $$EXIT
+
+# ── Unix socket end-to-end benchmark (server in Docker, client on host via bind mount) ──
+
+bench-unix-server-up: bench-grpc-server-build
+	mkdir -p $(UNIX_SOCK_DIR)
+	rm -f $(UNIX_SOCK_PATH)
+	docker rm -f $(SERVER_NAME) 2>/dev/null || true
+	docker run -d --name $(SERVER_NAME) \
+		--cpus="2.0" \
+		--memory="1g" \
+		--memory-swap="2g" \
+		-v $(UNIX_SOCK_DIR):$(UNIX_SOCK_DIR) \
+		-e FLUME_POOL_SIZE=$(POOL_SIZE) \
+		-e FLUME_SLOT_COUNT=$(SLOT_COUNT) \
+		-e FLUME_SLOT_SIZE=$(SLOT_SIZE) \
+		-e FLUME_MAX_WRITERS=$(MAX_WRITERS) \
+		-e FLUME_MAX_READERS=$(MAX_READERS) \
+		$(SERVER_IMAGE) -transport unix -addr $(UNIX_SOCK_PATH)
+
+bench-unix-server-down:
+	docker stop $(SERVER_NAME) && docker rm $(SERVER_NAME)
+
+bench-unix-run:
+	go run ./cmd/bench-transport \
+		-network=unix \
+		-addr=$(UNIX_SOCK_PATH) \
+		-concurrency=$(BENCH_CONC) \
+		-ops=$(BENCH_OPS) \
+		-payload=$(BENCH_PAYLOAD) \
+		-warmup-dur=$(BENCH_WARMUP_DUR) \
+		-read-buf=$(SLOT_SIZE)
+
+bench-unix: bench-unix-server-up
+	go run ./cmd/bench-transport \
+		-network=unix \
+		-addr=$(UNIX_SOCK_PATH) \
+		-concurrency=$(BENCH_CONC) \
+		-ops=$(BENCH_OPS) \
+		-payload=$(BENCH_PAYLOAD) \
+		-warmup-dur=$(BENCH_WARMUP_DUR) \
+		-read-buf=$(SLOT_SIZE); \
+	EXIT=$$?; \
+	docker stop $(SERVER_NAME); docker rm $(SERVER_NAME); \
+	exit $$EXIT
+
+bench-decoupled-unix: bench-unix-server-up
+	go run ./cmd/bench-decoupled \
+		-network=unix \
+		-addr=$(UNIX_SOCK_PATH) \
 		-write-conc=$(BENCH_CONC) \
 		-read-conc=$(BENCH_CONC) \
 		-ops=$(BENCH_OPS) \

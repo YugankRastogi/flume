@@ -50,10 +50,8 @@ Flume is for everything else.
 
 ## The Core Tradeoff
 
-```
-Flushed data    → durable within store guarantees, fully replayable
-Unflushed data  → best effort, loss on node failure, loss window is configurable
-```
+> **Flushed data** — durable within store guarantees, fully replayable
+> **Unflushed data** — best effort; loss on node failure; loss window is configurable
 
 Every message carries a `durable` flag so readers know exactly which guarantee applies to each message they receive. No silent surprises.
 
@@ -69,7 +67,7 @@ The loss window is your flush interval. Short interval — more S3 writes, small
 Producer → gRPC → Writer → Lock-free Buffer Pool → Flush Contract → Store (S3/Local/Custom)
 ```
 
-- Pre-allocated fixed-size buffer pool, defined at compile time via Makefile
+- Pre-allocated fixed-size buffer pool, configured via env vars or `flume.json` at startup
 - Double buffering — while one buffer flushes to store, the other accepts writes
 - Atomic pointer swap between buffers — single CAS operation, no mutex on hot path
 - Flush triggered by composable contracts — size, time, or custom logic
@@ -88,85 +86,21 @@ Reader → gRPC Subscribe → Stream from active buffer or Store
 
 ### Storage Interface
 
-```go
-type SnapshotStore interface {
-    Write(namespace string, seqStart, seqEnd uint64, data []byte) error
-    List(namespace string, from, to uint64) ([]SnapshotMeta, error)
-    Read(namespace string, seqStart, seqEnd uint64) ([]byte, error)
-    Delete(namespace string, seqStart, seqEnd uint64) error
-}
-```
+Ships with: `LocalStore`, `S3Store`, `GCSStore`, `AzureBlobStore`
 
-Ship with: `LocalStore`, `S3Store`, `GCSStore`, `AzureBlobStore`
-
-Compose for durability:
-
-```go
-// Write to local AND S3 simultaneously
-store := MultiStore{stores: []SnapshotStore{localStore, s3Store}}
-```
+`MultiStore` lets you compose them — for example, writing to local disk and S3 simultaneously for redundancy.
 
 ---
 
 ## Flush Contracts
 
-```go
-type FlushContract interface {
-    ShouldFlush(b *Buffer) bool
-}
-
-// Built-in contracts
-SizeFlush{}    // flush when buffer hits capacity
-TimeFlush{}    // flush on timer regardless of size
-HybridFlush{}  // size OR time, whichever comes first
-
-// Compose them
-AggregateFlush{contracts: []FlushContract{sizeFlush, timeFlush}}
-```
+Three built-in contracts: size-based (flush when the buffer hits capacity), time-based (flush on a timer regardless of fill level), and hybrid (whichever comes first). Contracts are composable — `AggregateFlush` combines any set of them, and custom contracts are a single-method interface.
 
 ---
 
 ## gRPC API
 
-```protobuf
-service Flume {
-    rpc Write(WriteRequest) returns (WriteResponse);
-    rpc Subscribe(SubscribeRequest) returns (stream Message);
-    rpc Ack(AckRequest) returns (AckResponse);
-}
-
-message Message {
-    uint64 seq       = 1;  // monotonic, per writer instance
-    bytes  data      = 2;
-    string namespace = 3;
-    bool   durable   = 4;  // false = still in unflushed buffer
-}
-```
-
----
-
-## Compile-Time Configuration
-
-Buffer pool topology is defined at compile time via Makefile — no runtime discovery overhead, no dynamic allocation, predictable memory footprint.
-
-```makefile
-# config
-BUFFER_COUNT  ?= 8      # number of buffers in pool
-BUFFER_SIZE   ?= 1024   # message slots per buffer
-MESSAGE_CAP   ?= 4096   # max bytes per message
-STORE         ?= local  # local | s3 | gcs | azure
-
-generate:
-    go generate ./...
-
-validate:
-    @echo "Memory footprint: $$(( $(BUFFER_COUNT) * $(BUFFER_SIZE) * $(MESSAGE_CAP) )) bytes"
-
-deploy:
-    make validate
-    make generate
-    docker build -t flume .
-```
+Three RPCs: `Write`, `Subscribe` (server-streaming), and `Ack`. Every message carries a monotonic sequence number scoped to the writer instance and a `durable` flag — `false` means the message is still in the unflushed buffer, `true` means it has been committed to the store.
 
 ---
 
@@ -175,13 +109,6 @@ deploy:
 Flume instances are fully independent. No coordination protocol between nodes. No leader election.
 
 Scale by adding instances. Producers decide how to distribute across instances — consistent hashing, round robin, key-based, whatever fits your topology. Flume doesn't own that decision.
-
-```bash
-# need more throughput? add an instance
-docker run flume --namespace metrics-1
-docker run flume --namespace metrics-2
-# update producer to hash across both
-```
 
 ---
 
@@ -234,6 +161,63 @@ docker run flume --namespace metrics-2
 - **v0.1** — core buffer pool, gRPC server, local store, S3 store, sequence numbers, gap detection, replay, composable flush contracts
 - **v0.2** — embedded Go library mode, TCP wrapper, GCS and Azure store implementations
 - **v0.3** — metrics endpoint, Prometheus integration, gap detection alerting
+
+---
+
+## Build and Run
+
+**Prerequisites:** Go 1.24+, Docker (for containerised runs and end-to-end benchmarks).
+
+**Build**
+
+```bash
+go build -o flume-server ./cmd/server
+```
+
+Or as a Docker image:
+
+```bash
+docker build -f Dockerfile.server -t flume .
+```
+
+**Configure the pool** via `flume.json` in the working directory, or environment variables:
+
+| Env var | Description | Default |
+|---|---|---|
+| `FLUME_POOL_SIZE` | Number of buffers in pool | 128 |
+| `FLUME_SLOT_COUNT` | Slots per buffer | 32 |
+| `FLUME_SLOT_SIZE` | Max bytes per slot | 131072 |
+| `FLUME_MAX_WRITERS` | Max concurrent writers | 1024 |
+| `FLUME_MAX_READERS` | Max concurrent readers | 1024 |
+
+**Run**
+
+```bash
+# TCP (default)
+./flume-server -transport tcp -addr :50051
+
+# gRPC
+./flume-server -transport grpc -addr :50051
+
+# Unix socket
+./flume-server -transport unix -addr /tmp/flume.sock
+```
+
+Docker:
+
+```bash
+docker run -p 50051:50051 \
+  -e FLUME_POOL_SIZE=128 \
+  -e FLUME_SLOT_COUNT=32 \
+  -e FLUME_SLOT_SIZE=131072 \
+  flume
+```
+
+**Tests**
+
+```bash
+make test
+```
 
 ---
 
@@ -415,36 +399,11 @@ The fix was to stop treating re-activation as a writer-side race at all. The flu
 
 ### Write path
 
-`Pool.Write` allocates a global sequence number, routes to the target buffer via bit-shift, then spins until the slot is claimed or the buffer cycles back to active:
-
-```go
-seq := pool.seq.Add(1)
-idx := (seq >> pool.slotShift) & (uint64(pool.poolSize) - 1)
-buf := pool.buffers[idx]
-
-for {
-    switch bufferState(buf.state.Load()) {
-    case stateActive:
-        err := buf.write(reader, seq)
-        if errors.Is(err, ErrSlotClaimFailed) {
-            runtime.Gosched()
-            continue
-        }
-        return err
-    default: // ReadyForFlush or Flushing — wait for the flusher to cycle it back
-        runtime.Gosched()
-    }
-}
-```
+`Pool.Write` allocates a global sequence number, routes to the target buffer via bit-shift, then spins until the slot is claimed or the buffer cycles back to active.
 
 **Slot-size trimming**: `pool.Write` calls `reader.Read(s.buf)` once, where `s.buf` is exactly `slotSize` bytes. If the reader delivers more than `slotSize` bytes, only the first `slotSize` are stored; the rest are silently discarded. If the reader delivers fewer, only those bytes are stored and `slot.n` records the actual length. This is intentional: the slot is the size contract, not the input. Callers that need hard guarantees should wrap their reader in an `io.LimitedReader` at the call site.
 
-Inside `buf.write`, the slot is claimed via two CAS operations. The operands are derived from `seq` and `ringSize` directly — not from a freshly-loaded slot value — so two competing writers always compute the same expected-old and only one can win:
-
-```
-first CAS:  expectedOld = seq - ringSize   →  expectedNew = seq - ringSize + 1   (claim slot)
-second CAS: expectedNew                    →  expectedNew + 1                     (mark ready for read)
-```
+Inside `buf.write`, the slot is claimed via two CAS operations. The operands are derived from `seq` and `ringSize` directly — not from a freshly-loaded slot value — so two competing writers always compute the same expected-old and only one can win. The first CAS claims the slot; the second marks it ready for read.
 
 ### Read path
 

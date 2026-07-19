@@ -63,7 +63,10 @@ type Pool struct {
 	slotShift uint8
 }
 
-func (pool *Pool) Write(reader io.Reader) error {
+// Write pushes one message into the pool. msgLen is the producer-declared
+// message length; the message is capped at the pool's slot size (see
+// buffer.Buffer.Write), so callers reading from a stream must drain any excess.
+func (pool *Pool) Write(reader io.Reader, msgLen int) error {
 	seq := pool.seq.Add(1)
 	bufMask := uint64(pool.poolSize) - 1
 	idx := (seq >> pool.slotShift) & bufMask
@@ -72,7 +75,7 @@ func (pool *Pool) Write(reader io.Reader) error {
 	var count int
 	for {
 		if buf.IsActive() {
-			err := buf.Write(reader, seq)
+			err := buf.Write(reader, seq, msgLen)
 			if errors.Is(err, buffer.ErrSlotClaimFailed) {
 				count++
 				if count > 4 {

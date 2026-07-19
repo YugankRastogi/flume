@@ -22,6 +22,7 @@ const (
 // at buffer construction, and reused for the life of the process — this is
 // what gives the write path its "no GC pressure" property.
 type slot struct {
+	_ cpu.CacheLinePad
 	// seq is this slot's claim marker, not the message's global sequence
 	// number. A writer for global sequence s may only claim this slot by
 	// CAS-ing seq from s-ringSize to s-ringSize+1 -- i.e. the slot's previous
@@ -31,6 +32,7 @@ type slot struct {
 	// expected-old and only one can ever win. Closing the gap from
 	// s-ringSize+1 up to s is done by a later retire-after-flush step.
 	seq atomic.Uint64
+	_   cpu.CacheLinePad
 	n   atomic.Uint32 // bytes actually written into buf (<= slotSize); 0 means unwritten
 	buf []byte        // fixed-capacity backing array, len == slotSize
 }
@@ -84,7 +86,15 @@ func (b *Buffer) IsActive() bool {
 	return bufferState(b.state.Load()) == stateActive
 }
 
-func (b *Buffer) Write(reader io.Reader, seq uint64) error {
+// Write claims the slot for global sequence seq and fills it with the message.
+// msgLen is the producer-declared message length; the slot is a hard cap, so at
+// most len(s.buf) bytes are read (the caller drains any excess to keep a
+// streaming source in sync). Reading exactly want bytes with io.ReadFull — not a
+// single reader.Read — is what guarantees the whole message lands in the slot
+// even when the source (e.g. a socket) delivers it across several Reads. want
+// never exceeds the bytes the reader will yield, so ReadFull can't short-read
+// into ErrUnexpectedEOF; the read target (s.buf[:want]) mirrors the slot size.
+func (b *Buffer) Write(reader io.Reader, seq uint64, msgLen int) error {
 	idx := seq & (uint64(len(b.slots)) - 1)
 	s := &b.slots[idx]
 
@@ -94,11 +104,17 @@ func (b *Buffer) Write(reader io.Reader, seq uint64) error {
 		return ErrSlotClaimFailed
 	}
 
-	n, err := reader.Read(s.buf)
-	if err != nil && err != io.EOF {
+	want := msgLen
+	if want > len(s.buf) {
+		want = len(s.buf)
+	}
+	if want < 0 {
+		want = 0
+	}
+	if _, err := io.ReadFull(reader, s.buf[:want]); err != nil && err != io.EOF {
 		return err
 	}
-	s.n.Store(uint32(n))
+	s.n.Store(uint32(want))
 
 	readyForRead := expectedNew + 1
 	if !s.seq.CompareAndSwap(expectedNew, readyForRead) {

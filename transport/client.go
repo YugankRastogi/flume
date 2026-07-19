@@ -25,9 +25,12 @@ type Client struct {
 	w       *bufio.Writer
 }
 
-// Dial connects to a flume transport server at network/addr.
+// Dial connects to a flume transport server at network/addr. bufSize sizes the
+// per-connection bufio read/write buffers so they can hold a whole slot-sized
+// message plus framing; pass the server's slot_size (or the read buffer size
+// you intend to use). It is floored at connBufSize via bufSizeFor.
 // network is "tcp" or "unix".
-func Dial(network, addr string) (*Client, error) {
+func Dial(network, addr string, bufSize int) (*Client, error) {
 	conn, err := net.Dial(network, addr)
 	if err != nil {
 		return nil, err
@@ -35,12 +38,13 @@ func Dial(network, addr string) (*Client, error) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
+	bs := bufSizeFor(bufSize)
 	return &Client{
 		network: network,
 		addr:    addr,
 		conn:    conn,
-		r:       bufio.NewReaderSize(conn, connBufSize),
-		w:       bufio.NewWriterSize(conn, connBufSize),
+		r:       bufio.NewReaderSize(conn, bs),
+		w:       bufio.NewWriterSize(conn, bs),
 	}, nil
 }
 

@@ -91,7 +91,7 @@ func runWarmupDur(network, addr string, payload []byte, readBufSize, concurrency
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			client, err := transport.Dial(network, addr)
+			client, err := transport.Dial(network, addr, readBufSize)
 			if err != nil {
 				log.Printf("warmup goroutine %d: dial: %v", g, err)
 				return
@@ -150,7 +150,7 @@ func runDecoupled(
 		go func(g int) {
 			defer writeWg.Done()
 
-			client, err := transport.Dial(network, addr)
+			client, err := transport.Dial(network, addr, readBufSize)
 			if err != nil {
 				log.Printf("writer %d: dial: %v", g, err)
 				writeErrs.Add(int64(writeOpsEach))
@@ -185,7 +185,7 @@ func runDecoupled(
 		go func(g int) {
 			defer readWg.Done()
 
-			client, err := transport.Dial(network, addr)
+			client, err := transport.Dial(network, addr, readBufSize)
 			if err != nil {
 				log.Printf("reader %d: dial: %v", g, err)
 				readErrs.Add(int64(readOpsEach))

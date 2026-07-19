@@ -39,7 +39,7 @@ func (s *Server) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResp
 	default:
 		return nil, status.Error(codes.ResourceExhausted, "writer pool exhausted")
 	}
-	if err := pool.DefaultPool.Write(bytes.NewReader(req.Data)); err != nil {
+	if err := pool.DefaultPool.Write(bytes.NewReader(req.Data), len(req.Data)); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &pb.WriteResponse{}, nil

@@ -250,53 +250,96 @@ Starts the server inside Docker with EC2-like constraints (`--cpus=2.0 --memory=
 
 ## Benchmarks
 
-`BenchmarkPoolParallelWriteRead`: dedicated writer goroutines and reader goroutines run simultaneously (writes and reads in parallel, not serialised per goroutine). 0 B/op, 0 allocs/op across all cases.
+`BenchmarkPoolParallelWriteRead`: dedicated writer goroutines and reader goroutines run simultaneously (writes and reads in parallel, not serialised per goroutine). `0 allocs/op` across all cases; `0 B/op` up to 16KB, with a few amortized bytes at the 1MB case (the flush-goroutine spawn, not a hot-path allocation).
 
-    ### Apple M4 — bare metal (arm64, 10 cores), Go 1.26, `GOMAXPROCS=10`
+Ring: `pool_size=16, slot_count=64, ring_size=1024`, `NoopFlusher`. (Widened from the previous 256-slot ring, which measurably cut small-payload contention — see below.) Each slot's hot `seq` atomic is now cache-line padded (`cpu.CacheLinePad`) to eliminate false sharing between adjacent slots.
 
-    1 writer goroutine per 2 cores — 5 writers, 5 readers running concurrently.
+    ### Apple M4 — bare metal (arm64, 10 cores), Go 1.26.1, `GOMAXPROCS=10`
+
+    1 writer goroutine per 2 cores — 5 writers, 5 readers running concurrently. 6 runs per size (`-count=6`).
 
     ```
-    BenchmarkPoolParallelWriteRead/slot=64B-10      12576715     95.38 ns/op     335.49 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=64B-10      11321190    100.20 ns/op     319.40 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=64B-10      12068544    101.00 ns/op     316.81 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=256B-10     10224723    104.40 ns/op    1225.53 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=256B-10     12100560     97.72 ns/op    1309.91 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=256B-10     12718404     97.87 ns/op    1307.89 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=1KB-10      11650956    102.90 ns/op    4974.48 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=1KB-10      11877733    106.10 ns/op    4826.15 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=1KB-10      11568578    101.80 ns/op    5028.24 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=4KB-10      10112046    119.50 ns/op   17131.80 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=4KB-10       9895111    123.20 ns/op   16617.82 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=4KB-10       9843252    119.20 ns/op   17183.80 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=16KB-10      5980168    201.70 ns/op   40620.13 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=16KB-10      6119926    202.40 ns/op   40477.41 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=16KB-10      6076501    201.00 ns/op   40749.07 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-10      24235100     43.61 ns/op     733.82 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-10      27550923     43.79 ns/op     730.79 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-10      28515189     42.59 ns/op     751.30 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-10      27780805     44.45 ns/op     719.87 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-10      28484533     43.39 ns/op     737.57 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-10      27882848     44.82 ns/op     714.02 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-10     26057028     45.45 ns/op    2816.28 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-10     26900527     46.88 ns/op    2730.13 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-10     26581948     42.80 ns/op    2990.39 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-10     26744125     43.33 ns/op    2953.91 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-10     25326763     45.03 ns/op    2842.31 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-10     26076870     44.90 ns/op    2850.80 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-10      24242240     49.89 ns/op   10262.59 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-10      23950561     48.67 ns/op   10520.07 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-10      23734998     49.78 ns/op   10285.93 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-10      24520968     48.81 ns/op   10490.36 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-10      24001080     51.39 ns/op    9963.59 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-10      23965628     49.63 ns/op   10316.14 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-10      18380874     61.56 ns/op   33269.77 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-10      19337865     63.40 ns/op   32302.10 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-10      19735218     65.36 ns/op   31333.49 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-10      18910567     66.24 ns/op   30917.37 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-10      19172518     61.38 ns/op   33363.38 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-10      19009298     63.60 ns/op   32201.68 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-10      8394288    146.30 ns/op   55992.96 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-10      8127222    149.00 ns/op   54962.04 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-10      8276037    147.20 ns/op   55663.77 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-10      8171067    148.30 ns/op   55233.22 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-10      8169410    148.20 ns/op   55259.54 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-10      8273536    146.80 ns/op   55811.00 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-10      1697137    706.70 ns/op   46368.75 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-10      1709373    704.90 ns/op   46485.69 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-10      1708263    705.90 ns/op   46419.99 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-10      1690830    707.30 ns/op   46329.51 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-10      1707481    703.40 ns/op   46583.02 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-10      1693677    705.50 ns/op   46447.15 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-10      815218   1461.00 ns/op   44852.53 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-10      808332   1458.00 ns/op   44962.96 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-10      806031   1463.00 ns/op   44804.73 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-10      847561   1455.00 ns/op   45039.70 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-10      796464   1462.00 ns/op   44839.44 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-10      803616   1458.00 ns/op   44941.48 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1MB-10         85132   14498.00 ns/op   36161.84 MB/s   61 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1MB-10         84231   14703.00 ns/op   35659.63 MB/s   62 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1MB-10         83820   14517.00 ns/op   36114.88 MB/s   62 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1MB-10         84456   14500.00 ns/op   36158.99 MB/s   62 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1MB-10         84955   14528.00 ns/op   36087.76 MB/s   61 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1MB-10         84694   14550.00 ns/op   36033.00 MB/s   62 B/op    0 allocs/op
     ```
+
+    At 1MB the per-op cost (~14.5µs) is dominated by moving the payload through the CPU twice per op (write-into-slot copy + read-out copy), i.e. it is memory-bandwidth bound, not lock- or contention-bound. Neither the wider ring nor the slot padding moves it — but throughput still lands at ~36 GB/s. Smaller payloads, which fit in cache, are where contention lives and where both changes helped: cache-line padding the per-slot `seq` atomic cut the small-slot medians a further ~4–8% on top of the wider ring (e.g. `slot=256B` from ~49 to ~45 ns/op, `slot=1KB` from ~52 to ~50 ns/op), while the large bandwidth-bound sizes stayed flat.
 
     ### Docker on Apple M4 (arm64), Go 1.26, `GOMAXPROCS=2`, `--cpus=2.0`, `--memory=1g`, `--memory-swap=1g`
 
     1 writer goroutine, 1 reader goroutine running concurrently.
 
     ```
-    BenchmarkPoolParallelWriteRead/slot=64B-2     335801712     34.74 ns/op     921.15 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=64B-2     366691089     31.99 ns/op    1000.33 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=64B-2     487793988     31.29 ns/op    1022.53 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=256B-2    348042902     32.92 ns/op    3888.30 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=256B-2    369447681     32.81 ns/op    3901.32 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=256B-2    352809226     32.34 ns/op    3958.39 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=1KB-2     264769341     42.90 ns/op   11933.97 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=1KB-2     223474969     45.64 ns/op   11217.19 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=1KB-2     252087400     45.33 ns/op   11294.22 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=4KB-2     120227332    105.80 ns/op   19349.65 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=4KB-2     100000000    107.70 ns/op   19015.61 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=4KB-2     100000000    101.20 ns/op   20243.26 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=16KB-2     43026848    268.40 ns/op   30523.22 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=16KB-2     42210895    271.80 ns/op   30140.61 MB/s    0 B/op    0 allocs/op
-    BenchmarkPoolParallelWriteRead/slot=16KB-2     41751082    274.30 ns/op   29865.65 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-2      179830278     72.15 ns/op     443.51 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-2      183011487     66.15 ns/op     483.73 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64B-2      183276253     66.20 ns/op     483.39 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-2     351497481     33.79 ns/op    3788.17 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-2     353598435     33.48 ns/op    3823.47 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=256B-2     358525429     34.00 ns/op    3765.18 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-2      544553042     22.36 ns/op   22899.55 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-2      541049794     21.74 ns/op   23549.50 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=1KB-2      558701820     21.57 ns/op   23735.81 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-2      351549813     34.48 ns/op   59401.36 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-2      348823722     34.31 ns/op   59698.02 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=4KB-2      349782222     34.48 ns/op   59394.51 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-2     71546697     184.00 ns/op   44514.01 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-2     63121957     187.80 ns/op   43631.67 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=16KB-2     58592008     191.50 ns/op   42775.67 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-2     14624562     876.30 ns/op   37394.97 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-2     12950358     955.10 ns/op   34308.81 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=64KB-2     11997411     951.40 ns/op   34442.41 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-2     6157773    2069.00 ns/op   31669.69 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-2     5736204    2026.00 ns/op   32348.26 MB/s    0 B/op    0 allocs/op
+    BenchmarkPoolParallelWriteRead/slot=128KB-2     6164020    2030.00 ns/op   32291.02 MB/s    0 B/op    0 allocs/op
     ```
 
-    Latency under constrained 2-CPU Docker is ~32–46 ns/op for sub-4KB slots — faster per-op than the 10-core run due to lower contention with only 1 writer and 1 reader. The 16KB case rises to ~270 ns as the payload exceeds cache. Throughput peaks at ~20 GB/s at 4KB and ~30 GB/s at 16KB.
+    Under the constrained 2-CPU / 1 GB container, per-op latency runs ~22–2070 ns/op depending on slot size, with `0 B/op` / `0 allocs/op` held throughout. With `GOMAXPROCS=2` the workload is a single writer paired with a single reader, so ring contention is far lower than the 10-core bare-metal case above — cache-fitting payloads (256B–4KB) actually clock *faster* here (~22–34 ns/op) than on bare metal, while larger payloads become memory-bandwidth bound and settle at ~31–37 GB/s. The 1MB case is omitted: its ring requires `1024 × 1MB = 1 GB`, which exceeds the container's `--memory=1g` cap and is OOM-killed.
 
 ### gRPC end-to-end — Docker on Apple M4 (arm64), `--cpus=2.0`, `--memory=1g`, `--memory-swap=2g`
 
@@ -385,62 +428,97 @@ The same Docker VM scheduling caveat applies: the max (~205ms) is a single hyper
 
 ### Unix socket end-to-end — Apple M4 bare metal (arm64), server and client on host
 
-Pool config: `pool_size=128, slot_count=32, slot_size=128KB`. Client: 16 goroutines (one persistent connection each), 1,000,000 write+read pairs, 4KB payload, 5s warmup at full concurrency discarded. Unix domain sockets bypass the TCP/IP stack entirely — the kernel copies data directly between processes without the network state machine. On macOS, Docker Desktop's VirtioFS bind-mount layer does not propagate Unix socket inodes to the host, so this benchmark runs server and client directly on the host rather than in Docker. The server is unconstrained; results reflect native host scheduling rather than a 2-CPU container.
+Pool config: `pool_size=128, slot_count=32, slot_size=128KB`, **`FLUME_FLUSHER=noop`**. Client: 16 goroutines (one persistent connection each), 1,000,000 write+read pairs, 4KB payload, 5s warmup at full concurrency discarded. Unix domain sockets bypass the TCP/IP stack entirely — the kernel copies data directly between processes without the network state machine. On macOS, Docker Desktop's VirtioFS bind-mount layer does not propagate Unix socket inodes to the host, so this benchmark runs server and client directly on the host rather than in Docker. The server is unconstrained; results reflect native host scheduling rather than a 2-CPU container.
+
+`noop` is used deliberately, exactly as the 1MB TCP section above does: it isolates the transport and pool from storage-flush backpressure. With the default `DummyFlusher` (which sleeps 50–500ms per buffer flush to model an S3 `PUT`) the same run is throttled to ~14,500 ops/sec with a p99 in the tens of milliseconds — that ceiling is the *simulated flush latency*, not the socket. Switching to `noop` recovers the transport's true numbers, a ~13× jump:
 
 ```
 Successful pairs:     1,000,000
-Wall time:            1m8.991s
+Wall time:            5.157s
 
-Throughput:           14,495 ops/sec
+Throughput:           193,917 ops/sec
 
-Data written:         3,906.25 MB  (56.62 MB/s)
-Data read:            3,906.25 MB  (56.62 MB/s)
+Data written:         3,906.25 MB  (757.49 MB/s)
+Data read:            3,906.25 MB  (757.49 MB/s)
 
-Allocs/op (client):   0.0  (13 B/op)
+Allocs/op (client):   0.0  (15 B/op)
 
-Latency p50:          93.125µs
-Latency p90:          141.917µs
-Latency p99:          23.106ms
-Latency min:          6.375µs
-Latency max:          389.156ms
+Latency p50:          78.625µs
+Latency p90:          130.25µs
+Latency p99:          179.167µs
+Latency min:          6.709µs
+Latency max:          941.542µs
 ```
 
-p50/p90 land at 93µs and 142µs — 6.5–6.7× lower than TCP loopback (627µs / 928µs) at the same concurrency and payload. The minimum of 6µs vs TCP's 158µs reflects the absence of the TCP state machine: a Unix socket write is a kernel buffer copy, not a full network round trip. Throughput is ~14,500 ops/sec vs ~12,650 for TCP — a modest gain because both are already bottlenecked on the pool's 32-slot ring at 16 goroutines, not on transport bandwidth.
+p50/p90/p99 land at 79µs / 130µs / 179µs — a tight spread, with none of the tens-of-ms flush stalls the dummy-flusher run showed. Sweeping connection count (same host, `noop`, 4KB payload) locates where the ceiling actually is:
 
-The p99 (23ms) is a recurring macOS scheduler artefact, not a transport characteristic. macOS is not a real-time OS; the scheduler preempts goroutine-heavy workloads on Apple Silicon at irregular intervals, causing periodic ~23ms stalls that affect roughly 1% of operations regardless of transport. On a bare-metal Linux host these stalls do not occur and p99 tracks p90 closely, as confirmed by the pool-layer benchmarks (32–270 ns/op) which show no scheduler noise.
+| connections | throughput (ops/sec) | p50 | p99 |
+|---|---|---|---|
+| 1 | 95,971 | 10.2µs | 15.8µs |
+| 8 | 137,162 | 57.3µs | 118.7µs |
+| 16 | 193,917 | 78.6µs | 179.2µs |
+| 32 | 257,868 | 114.3µs | 290.0µs |
+| 64 | 288,976 | 197.8µs | 657.0µs |
+| 128 | 274,665 | 389.3µs | 1.68ms |
+
+A single connection round-trips in ~10µs — essentially the syscall floor (client write + server read + server write + client read). Throughput peaks near 64 connections (~289k ops/sec) and then declines as pool-ring contention grows: when readers and writers fall out of lockstep across connections, a reader can request a sequence not yet written and spin-waits on the pool's backoff. The transport itself is not the limit at these sizes — the ring is.
 
 ### Unix socket decoupled — Apple M4 bare metal (arm64), server and client on host
 
-Same host setup and pool config. Client: 16 writer goroutines + 16 reader goroutines running simultaneously (each with its own connection), 1,000,000 writes + 1,000,000 reads, 4KB payload, 5s warmup discarded.
+Same host setup, pool config, and `FLUME_FLUSHER=noop`. Client: 16 writer goroutines + 16 reader goroutines running simultaneously (each with its own connection), 1,000,000 writes + 1,000,000 reads, 4KB payload, 5s warmup discarded.
 
 ```
-Wall time:            1m7.994s
-Allocs/op (client):   0.0  (12 B/op)
+Wall time:            6.777s
+Allocs/op (client):   0.0  (14 B/op)
 
 --- Writes ---
 Successful ops:       1,000,000
-Throughput:           14,707 ops/sec
-Data:                 3,906.25 MB  (57.45 MB/s)
-Latency p50:          109.709µs
-Latency p90:          191.375µs
-Latency p99:          23.196ms
-Latency min:          3.667µs
-Latency max:          391.325ms
+Throughput:           147,551 ops/sec
+Data:                 3,906.25 MB  (576.37 MB/s)
+Latency p50:          100.083µs
+Latency p90:          178.75µs
+Latency p99:          254.375µs
+Latency min:          3.709µs
+Latency max:          4.496666ms
 
 --- Reads ---
 Successful ops:       1,000,000
-Throughput:           14,707 ops/sec
-Data:                 3,906.25 MB  (57.45 MB/s)
-Latency p50:          114.458µs
-Latency p90:          192.625µs
-Latency p99:          23.065ms
-Latency min:          6.625µs
-Latency max:          391.239ms
+Throughput:           147,551 ops/sec
+Data:                 3,906.25 MB  (576.37 MB/s)
+Latency p50:          101.292µs
+Latency p90:          175.791µs
+Latency p99:          240.875µs
+Latency min:          6.042µs
+Latency max:          2.889208ms
 ```
 
-Write and read p50/p90 are symmetrical (110µs / 114µs and 191µs / 193µs), confirming neither side is backpressure-limited. Compared to TCP decoupled (write p50 977µs, read p50 983µs), Unix socket cuts median latency by ~8.9×. Allocs/op remain 0 — the decoupled path shares the same allocation-free client as the paired benchmark.
+Write and read p50/p90 are symmetrical (100µs / 101µs and 179µs / 176µs), confirming neither side is backpressure-limited. Splitting writes and reads onto separate connections (32 total vs the 16 paired above) trades some throughput — 148k vs 194k ops/sec — for the ability to drive each direction independently; the extra goroutines contend more on the pool ring. Allocs/op remain 0 — the decoupled path shares the same allocation-free client as the paired benchmark.
 
-The p99 macOS scheduling caveat applies identically here. The p50/p90 are the representative signal.
+> **Cross-transport comparison caveat:** the gRPC and TCP sections above were measured with the default `DummyFlusher` inside a 2-CPU Docker container, whereas these Unix numbers use `noop` on an unconstrained bare-metal host. The absolute figures are therefore not directly comparable — compare transports only at matched flusher and host settings.
+
+### TCP large-payload (1MB) end-to-end — Apple M4 bare metal (arm64), server and client on host
+
+Validates the full-slot fill path at a large payload. The server reads each message into its slot with `io.ReadFull` (not a single `reader.Read`), so a 1MB message — far larger than one TCP segment or the historical 64KB bufio buffer — lands in the slot intact rather than truncated. Config: `pool_size=16, slot_count=64, slot_size=1MB` (`FLUME_SLOT_SIZE=1048576`), `FLUME_FLUSHER=noop`. Client: 8 goroutines (pipelined `WriteRead`), 20,000 write+read pairs, 1MB payload, 1s warmup discarded.
+
+```
+Successful pairs:     20,000
+Wall time:            4.065s
+
+Throughput:           4,920 ops/sec
+
+Data written:         20,000.00 MB  (4,919.70 MB/s)
+Data read:            20,000.00 MB  (4,919.70 MB/s)
+
+Allocs/op (client):   0.0  (1,274 B/op)
+
+Latency p50:          1.582ms
+Latency p90:          2.441ms
+Latency p99:          3.361ms
+Latency min:          191.209µs
+Latency max:          7.668ms
+```
+
+`Data written == Data read` (20,000 MB each) confirms zero truncation — every byte of every 1MB message roundtrips. Two knobs drive the numbers: the flusher and the ring width. With the default `DummyFlusher` (which sleeps 50–500ms to simulate S3 `PUT` latency) the same run manages only ~1,600 MB/s with a p99 of ~85ms and max ~349ms, because every buffer that fills stalls the whole slot for tens of milliseconds. Switching to `NoopFlusher` and widening the ring to 1024 slots removes that stall: throughput triples to ~4,920 MB/s and p99 collapses to 3.4ms. Use `noop` for pool/transport benchmarking; `dummy` only when you deliberately want to model storage-flush backpressure.
 
 ---
 

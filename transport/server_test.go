@@ -50,7 +50,7 @@ func startTestServer(t *testing.T, p *pool.Pool) string {
 func TestTCP_SingleRoundtrip(t *testing.T) {
 	addr := startTestServer(t, newTestPool(t))
 
-	c, err := transport.Dial("tcp", addr)
+	c, err := transport.Dial("tcp", addr, int(testSlotSize))
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -71,13 +71,54 @@ func TestTCP_SingleRoundtrip(t *testing.T) {
 	}
 }
 
+// TestTCP_LargePayloadRoundtrip verifies that a message far larger than one TCP
+// segment (and larger than the historical 64KB bufio buffer) is filled into the
+// slot in full, not truncated at the first Read. A single non-looping read on
+// the server side would record only the first chunk; io.ReadFull fills the slot.
+func TestTCP_LargePayloadRoundtrip(t *testing.T) {
+	const largeSlotSize = uint64(256 * 1024) // 256KB > one segment > 64KB
+	details := testPoolSize | (testSlotCount << 10) | (largeSlotSize << 26)
+	p, err := pool.CreatePool(details, 0, flusher.NoopFlusher{})
+	if err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	addr := startTestServer(t, p)
+
+	c, err := transport.Dial("tcp", addr, int(largeSlotSize))
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	// Fill a full slot with a recognizable, position-dependent pattern so any
+	// truncation or misalignment is caught byte-for-byte.
+	want := make([]byte, largeSlotSize)
+	for i := range want {
+		want[i] = byte(i*31 + 7)
+	}
+
+	buf := make([]byte, largeSlotSize)
+	got, err := c.WriteRead(want, buf)
+	if err != nil {
+		t.Fatalf("WriteRead: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %d bytes, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("content mismatch at byte %d: got %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
 // TestTCP_WriteReadPipelined verifies the pipelined WriteRead method.
 // Single client is the only one talking to a fresh pool, so the message
 // written in each call is guaranteed to be the one read back.
 func TestTCP_WriteReadPipelined(t *testing.T) {
 	addr := startTestServer(t, newTestPool(t))
 
-	c, err := transport.Dial("tcp", addr)
+	c, err := transport.Dial("tcp", addr, int(testSlotSize))
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -143,7 +184,7 @@ func runDecoupledTest(t *testing.T, nWriters, nReaders, opsEach int) {
 		go func(g int) {
 			defer writeWg.Done()
 
-			c, err := transport.Dial("tcp", addr)
+			c, err := transport.Dial("tcp", addr, int(testSlotSize))
 			if err != nil {
 				t.Errorf("writer %d: Dial: %v", g, err)
 				return
@@ -172,7 +213,7 @@ func runDecoupledTest(t *testing.T, nWriters, nReaders, opsEach int) {
 		go func(g int) {
 			defer readWg.Done()
 
-			c, err := transport.Dial("tcp", addr)
+			c, err := transport.Dial("tcp", addr, int(testSlotSize))
 			if err != nil {
 				t.Errorf("reader %d: Dial: %v", g, err)
 				return

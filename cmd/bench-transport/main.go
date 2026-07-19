@@ -25,7 +25,7 @@ func main() {
 	concurrency := flag.Int("concurrency", 16, "number of concurrent goroutines (each gets its own connection)")
 	totalOps := flag.Int("ops", 100000, "total write+read pairs to issue")
 	payloadSize := flag.Int("payload", 4096, "write payload size in bytes")
-	readBufSize := flag.Int("read-buf", 65536, "read buffer size per goroutine (must be >= server slot_size)")
+	readBufSize := flag.Int("read-buf", 131072, "read buffer size per goroutine (must be >= server slot_size)")
 	warmupDur := flag.Duration("warmup-dur", 2*time.Second, "warmup duration at full concurrency before measuring (discarded)")
 	connectTimeout := flag.Duration("connect-timeout", 30*time.Second, "time to wait for server readiness")
 	flag.Parse()
@@ -86,7 +86,7 @@ func runWarmupDur(network, addr string, payload []byte, readBufSize, concurrency
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			client, err := transport.Dial(network, addr)
+			client, err := transport.Dial(network, addr, readBufSize)
 			if err != nil {
 				log.Printf("warmup goroutine %d: dial: %v", g, err)
 				return
@@ -126,7 +126,7 @@ func runPairs(network, addr string, payload []byte, readBufSize, concurrency, to
 		go func(g int) {
 			defer wg.Done()
 
-			client, err := transport.Dial(network, addr)
+			client, err := transport.Dial(network, addr, readBufSize)
 			if err != nil {
 				log.Printf("goroutine %d: dial: %v", g, err)
 				errCount.Add(int64(perGoroutine))

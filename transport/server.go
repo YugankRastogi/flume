@@ -33,10 +33,26 @@ const (
 	StatusOK  byte = 0x00
 	StatusErr byte = 0x01
 
-	// connBufSize is the per-connection bufio buffer. 64KB + 8 bytes framing
-	// covers all practical slot sizes without additional allocation.
+	// frameHeaderSize is the wire framing overhead per message: a 1-byte opcode
+	// plus a 4-byte length prefix.
+	frameHeaderSize = 5
+
+	// connBufSize is the floor for a per-connection bufio buffer. Buffers are
+	// sized to hold a whole slot's payload plus framing (see bufSizeFor) so a
+	// full message fits without a refill; this floor keeps tiny slot sizes from
+	// producing pathologically small buffers.
 	connBufSize = 64*1024 + 8
 )
+
+// bufSizeFor returns the per-connection bufio buffer size that holds one
+// slotSize payload plus its frame header, never smaller than connBufSize. This
+// is what lets the bufio buffers mimic the pool's slot size.
+func bufSizeFor(slotSize int) int {
+	if n := slotSize + frameHeaderSize; n > connBufSize {
+		return n
+	}
+	return connBufSize
+}
 
 // limitedReaderPool recycles io.LimitedReader values so that the server's
 // write path doesn't allocate one per message (io.LimitReader would otherwise
@@ -86,8 +102,9 @@ func (s *Server) ListenAndServe(network, addr string) error {
 func (s *Server) serveConn(conn net.Conn) {
 	defer conn.Close()
 
-	r := bufio.NewReaderSize(conn, connBufSize)
-	w := bufio.NewWriterSize(conn, connBufSize)
+	bufSize := bufSizeFor(int(s.p.SlotSize()))
+	r := bufio.NewReaderSize(conn, bufSize)
+	w := bufio.NewWriterSize(conn, bufSize)
 
 	// readBuf is allocated once per connection and reused for every OpRead.
 	readBuf := make([]byte, s.p.SlotSize())
@@ -114,7 +131,7 @@ func (s *Server) serveConn(conn net.Conn) {
 			lr.R = r
 			lr.N = int64(n)
 
-			writeErr := s.p.Write(lr)
+			writeErr := s.p.Write(lr, int(n))
 
 			// Drain any bytes not consumed by pool.Write (payload > slotSize).
 			// Keeps the stream in sync regardless of write outcome.

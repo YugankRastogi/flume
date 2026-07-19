@@ -18,7 +18,7 @@ func encodeDetails(poolSize, slotCount, slotSize uint64) uint64 {
 
 func mustCreatePool(tb testing.TB, poolSize, slotCount, slotSize uint64) *Pool {
 	tb.Helper()
-	pool, err := CreatePool(encodeDetails(poolSize, slotCount, slotSize), 0, &flusher.DummyFlusher{})
+	pool, err := CreatePool(encodeDetails(poolSize, slotCount, slotSize), 0, flusher.NoopFlusher{})
 	if err != nil {
 		tb.Fatalf("CreatePool: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestPoolWrite_BasicRoundtrip(t *testing.T) {
 	pool := mustCreatePool(t, 8, 16, 256)
 
 	want := []byte("hello, flume")
-	if err := pool.Write(bytes.NewReader(want)); err != nil {
+	if err := pool.Write(bytes.NewReader(want), len(want)); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestPoolWrite_SequentialOrder(t *testing.T) {
 
 	for i := range ringSize {
 		msg := []byte(fmt.Sprintf("msg-%04d", i))
-		if err := pool.Write(bytes.NewReader(msg)); err != nil {
+		if err := pool.Write(bytes.NewReader(msg), len(msg)); err != nil {
 			t.Fatalf("Write[%d]: %v", i, err)
 		}
 	}
@@ -95,7 +95,7 @@ func TestPoolWrite_MultipleRingCycles(t *testing.T) {
 	for cycle := range cycles {
 		for i := range ringSize {
 			msg := []byte(fmt.Sprintf("c%d-%04d", cycle, i))
-			if err := pool.Write(bytes.NewReader(msg)); err != nil {
+			if err := pool.Write(bytes.NewReader(msg), len(msg)); err != nil {
 				t.Fatalf("cycle %d Write[%d]: %v", cycle, i, err)
 			}
 		}
@@ -141,7 +141,7 @@ func TestPoolWrite_Concurrent(t *testing.T) {
 			defer wg.Done()
 			payload := []byte(fmt.Sprintf("writer-%02d", w))
 			for range perGoroutine {
-				if err := pool.Write(bytes.NewReader(payload)); err != nil {
+				if err := pool.Write(bytes.NewReader(payload), len(payload)); err != nil {
 					t.Errorf("writer %d: Write: %v", w, err)
 					return
 				}
@@ -166,8 +166,8 @@ func TestPoolWrite_Concurrent(t *testing.T) {
 }
 
 // BenchmarkPoolThroughput measures single-goroutine write+read throughput for
-// various slot sizes. Ring: poolSize=8, slotCount=32, ringSize=256.
-// Peak memory per pool: 256 * 64 KB = 16 MB.
+// various slot sizes. Ring: poolSize=16, slotCount=64, ringSize=1024.
+// Peak memory per pool: 1024 * slotSize (1 GB at the 1MB case).
 func BenchmarkPoolThroughput(b *testing.B) {
 	cases := []struct {
 		name   string
@@ -179,11 +179,12 @@ func BenchmarkPoolThroughput(b *testing.B) {
 		{"slot=4KB", 4096},
 		{"slot=16KB", 16384},
 		{"slot=64KB", 65536},
+		{"slot=1MB", 1048576},
 	}
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &flusher.DummyFlusher{})
+			pool, err := CreatePool(encodeDetails(16, 64, tc.slotSz), 0, flusher.NoopFlusher{})
 			if err != nil {
 				b.Fatalf("CreatePool: %v", err)
 			}
@@ -197,7 +198,7 @@ func BenchmarkPoolThroughput(b *testing.B) {
 
 			for range b.N {
 				r.Reset(payload)
-				if err := pool.Write(r); err != nil {
+				if err := pool.Write(r, len(payload)); err != nil {
 					b.Fatal(err)
 				}
 				if _, err := pool.Read(readBuf); err != nil {
@@ -211,8 +212,8 @@ func BenchmarkPoolThroughput(b *testing.B) {
 // BenchmarkPoolParallelWriteRead benchmarks write and read throughput when
 // dedicated writer goroutines and reader goroutines run simultaneously.
 // Half of GOMAXPROCS goroutines write; the other half read.
-// Ring: poolSize=8, slotCount=32, ringSize=256.
-// Peak memory per pool: 256 * 16 KB = 4 MB.
+// Ring: poolSize=16, slotCount=64, ringSize=1024.
+// Peak memory per pool: 1024 * slotSize (1 GB at the 1MB case).
 func BenchmarkPoolParallelWriteRead(b *testing.B) {
 	cases := []struct {
 		name   string
@@ -223,11 +224,14 @@ func BenchmarkPoolParallelWriteRead(b *testing.B) {
 		{"slot=1KB", 1024},
 		{"slot=4KB", 4096},
 		{"slot=16KB", 16384},
+		{"slot=64KB", 65536},
+		{"slot=128KB", 131072},
+		{"slot=1MB", 1048576},
 	}
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &flusher.DummyFlusher{})
+			pool, err := CreatePool(encodeDetails(16, 64, tc.slotSz), 0, flusher.NoopFlusher{})
 			if err != nil {
 				b.Fatalf("CreatePool: %v", err)
 			}
@@ -252,7 +256,7 @@ func BenchmarkPoolParallelWriteRead(b *testing.B) {
 					perGoroutine := writerOps / nWriters
 					for range perGoroutine {
 						r.Reset(payload)
-						if err := pool.Write(r); err != nil {
+						if err := pool.Write(r, len(payload)); err != nil {
 							b.Error(err)
 							return
 						}
@@ -280,8 +284,8 @@ func BenchmarkPoolParallelWriteRead(b *testing.B) {
 
 // BenchmarkPoolConcurrentThroughput benchmarks write+read throughput across
 // GOMAXPROCS goroutines for various slot sizes.
-// Ring: poolSize=8, slotCount=32, ringSize=256.
-// Peak memory per pool: 256 * 16 KB = 4 MB.
+// Ring: poolSize=16, slotCount=64, ringSize=1024.
+// Peak memory per pool: 1024 * slotSize (1 GB at the 1MB case).
 func BenchmarkPoolConcurrentThroughput(b *testing.B) {
 	cases := []struct {
 		name   string
@@ -292,11 +296,12 @@ func BenchmarkPoolConcurrentThroughput(b *testing.B) {
 		{"slot=1KB", 1024},
 		{"slot=4KB", 4096},
 		{"slot=16KB", 16384},
+		{"slot=1MB", 1048576},
 	}
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			pool, err := CreatePool(encodeDetails(8, 32, tc.slotSz), 0, &flusher.DummyFlusher{})
+			pool, err := CreatePool(encodeDetails(16, 64, tc.slotSz), 0, flusher.NoopFlusher{})
 			if err != nil {
 				b.Fatalf("CreatePool: %v", err)
 			}
@@ -310,7 +315,7 @@ func BenchmarkPoolConcurrentThroughput(b *testing.B) {
 				r := bytes.NewReader(payload)
 				for pb.Next() {
 					r.Reset(payload)
-					if err := pool.Write(r); err != nil {
+					if err := pool.Write(r, len(payload)); err != nil {
 						b.Error(err)
 						return
 					}

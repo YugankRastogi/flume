@@ -17,6 +17,7 @@ type Config struct {
 	BufferID   int64  `json:"buffer_id"` // reserved for future use; defaults to 0
 	MaxWriters int    `json:"max_writers"`
 	MaxReaders int    `json:"max_readers"`
+	Flusher    string `json:"flusher"` // "noop" or "dummy" (default); selects the flusher wired into DefaultPool
 }
 
 // DefaultPool is the package-level pool initialized from env vars or a JSON
@@ -39,8 +40,13 @@ func init() {
 	if cfg.MaxReaders == 0 {
 		cfg.MaxReaders = defaultWorkers
 	}
+	var f flusher.Flusher = &flusher.DummyFlusher{}
+	if cfg.Flusher == "noop" {
+		f = flusher.NoopFlusher{}
+	}
+
 	details := cfg.PoolSize | (cfg.SlotCount << slotCountShift) | (cfg.SlotSize << slotSizeShift)
-	p, err := CreatePool(details, cfg.BufferID, &flusher.DummyFlusher{})
+	p, err := CreatePool(details, cfg.BufferID, f)
 	if err != nil {
 		panic("pool: auto-init failed: " + err.Error())
 	}
@@ -110,6 +116,7 @@ func loadFromEnv() (Config, bool) {
 		BufferID:   bufferID,
 		MaxWriters: maxWriters,
 		MaxReaders: maxReaders,
+		Flusher:    os.Getenv("FLUME_FLUSHER"),
 	}, true
 }
 

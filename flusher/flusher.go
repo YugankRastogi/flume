@@ -1,6 +1,7 @@
 package flusher
 
 import (
+	"io"
 	"math/rand"
 	"time"
 )
@@ -22,8 +23,15 @@ import (
 // Flush must not retain the buffer or its slots beyond the call: once it
 // returns, the buffer is eligible to be recycled back to stateActive and
 // its slots reused for a future activation.
+//
+// The reader begins with an 8-byte big-endian length prefix giving the
+// number of payload bytes that follow (the same framing buffer.Buffer
+// stores each slot in) -- implementations that need the payload size (e.g.
+// to set Content-Length without buffering the whole body to measure it) can
+// read that prefix off the front rather than buffering or seeking.
+// A single trailing call with a nil reader marks the end of a flush pass.
 type Flusher interface {
-	Flush() error
+	Flush(io.Reader) error
 }
 
 // NoopFlusher discards retired buffer data instantly with no latency.
@@ -31,11 +39,11 @@ type Flusher interface {
 // hot path from storage-simulation overhead.
 type NoopFlusher struct{}
 
-func (NoopFlusher) Flush() error { return nil }
+func (NoopFlusher) Flush(io.Reader) error { return nil }
 
 type DummyFlusher struct{}
 
-func (df *DummyFlusher) Flush() error {
+func (df *DummyFlusher) Flush(io.Reader) error {
 	<-time.After(simulateS3PutLatency())
 	return nil
 }

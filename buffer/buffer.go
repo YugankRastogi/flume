@@ -1,6 +1,9 @@
 package buffer
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -18,6 +21,8 @@ const (
 	stateFlushing                         // handed off to its Flusher, being written to the store
 )
 
+const bufferSizePadding = 8
+
 // slot holds a single message. buf is pre-allocated to slotSize bytes once,
 // at buffer construction, and reused for the life of the process — this is
 // what gives the write path its "no GC pressure" property.
@@ -33,8 +38,8 @@ type slot struct {
 	// s-ringSize+1 up to s is done by a later retire-after-flush step.
 	seq atomic.Uint64
 	_   cpu.CacheLinePad
-	n   atomic.Uint32 // bytes actually written into buf (<= slotSize); 0 means unwritten
-	buf []byte        // fixed-capacity backing array, len == slotSize
+	// n   atomic.Uint32 // bytes actually written into buf (<= slotSize); 0 means unwritten
+	buf []byte // fixed-capacity backing array, len == slotSize
 }
 
 // Buffer is one fixed-size slab in the Pool. Exactly one Buffer is "active"
@@ -75,7 +80,7 @@ type Buffer struct {
 func New(slotCount, slotSize, ringSize, baseSeq uint64, f flusher.Flusher) *Buffer {
 	slots := make([]slot, slotCount)
 	for j := range slots {
-		slots[j].buf = make([]byte, slotSize)
+		slots[j].buf = make([]byte, slotSize+bufferSizePadding)
 		slots[j].seq.Store(baseSeq + uint64(j))
 	}
 	return &Buffer{slots: slots, ringSize: ringSize, sink: f}
@@ -104,17 +109,18 @@ func (b *Buffer) Write(reader io.Reader, seq uint64, msgLen int) error {
 		return ErrSlotClaimFailed
 	}
 
-	want := msgLen
+	want := msgLen + bufferSizePadding
 	if want > len(s.buf) {
 		want = len(s.buf)
 	}
 	if want < 0 {
 		want = 0
 	}
-	if _, err := io.ReadFull(reader, s.buf[:want]); err != nil && err != io.EOF {
+	if _, err := io.ReadFull(reader, s.buf[bufferSizePadding:want]); err != nil && err != io.EOF {
 		return err
 	}
-	s.n.Store(uint32(want))
+	binary.BigEndian.PutUint64(s.buf[:bufferSizePadding], uint64(want))
+	// s.n.Store(uint32(want))
 
 	readyForRead := expectedNew + 1
 	if !s.seq.CompareAndSwap(expectedNew, readyForRead) {
@@ -133,9 +139,10 @@ func (b *Buffer) Read(seq uint64, readArr []byte) (uint32, error) {
 	if !s.seq.CompareAndSwap(expectedOld, expectedNew) {
 		return 0, ErrSlotClaimFailed
 	}
-	copy(readArr, s.buf)
+	copy(readArr, s.buf[bufferSizePadding:])
 
-	n := s.n.Load()
+	// n := s.n.Load()
+	n := binary.BigEndian.Uint64(s.buf[:bufferSizePadding])
 	// Use the Add return value directly so only the goroutine that bumps
 	// readCount to exactly len(slots) triggers the flush. A separate Load()
 	// would let two goroutines racing on the last slot both see the threshold
@@ -146,17 +153,20 @@ func (b *Buffer) Read(seq uint64, readArr []byte) (uint32, error) {
 		}
 	}
 
-	return n, nil
+	return uint32(n), nil
 }
 
-func (b *Buffer) flush() error {
+func (b *Buffer) flush() (err error) {
 	if !b.state.CompareAndSwap(int32(stateReadyForFlush), int32(stateFlushing)) {
 		panic("flush called without correct state")
 	}
 	defer func() {
-		for i := range b.slots {
-			b.slots[i].seq.Add(uint64(b.ringSize - 3))
-			clear(b.slots[i].buf[:b.slots[i].n.Load()])
+		if err != nil {
+			for i := range b.slots {
+				b.slots[i].seq.Add(uint64(b.ringSize - 3))
+				n := binary.BigEndian.Uint64(b.slots[i].buf[:bufferSizePadding]) + bufferSizePadding
+				clear(b.slots[i].buf[bufferSizePadding:n])
+			}
 		}
 		actual := b.readCount.Load()
 		if !b.readCount.CompareAndSwap(uint32(len(b.slots)), 0) {
@@ -168,5 +178,16 @@ func (b *Buffer) flush() error {
 		}
 	}()
 
-	return b.sink.Flush()
+	for i := range b.slots {
+		b.slots[i].seq.Add(uint64(b.ringSize - 3))
+		n := binary.BigEndian.Uint64(b.slots[i].buf[:bufferSizePadding]) + bufferSizePadding
+		fErr := b.sink.Flush(bytes.NewReader(b.slots[i].buf[:n]))
+		if fErr == nil {
+			clear(b.slots[i].buf[:n])
+			continue
+		}
+		err = errors.Join(err, fErr)
+	}
+
+	return b.sink.Flush(nil)
 }

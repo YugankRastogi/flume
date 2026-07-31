@@ -1,11 +1,14 @@
 package pool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/yugank/flume/flusher"
 )
 
@@ -17,7 +20,10 @@ type Config struct {
 	BufferID   int64  `json:"buffer_id"` // reserved for future use; defaults to 0
 	MaxWriters int    `json:"max_writers"`
 	MaxReaders int    `json:"max_readers"`
-	Flusher    string `json:"flusher"` // "noop" or "dummy" (default); selects the flusher wired into DefaultPool
+	Flusher    string `json:"flusher"`   // "noop", "s3", or "dummy" (default); selects the flusher wired into DefaultPool
+	S3Bucket   string `json:"s3_bucket"` // required when Flusher == "s3"
+	S3Prefix   string `json:"s3_prefix"` // optional key prefix when Flusher == "s3"
+	S3Region   string `json:"s3_region"` // optional; defaults to the AWS SDK's region resolution
 }
 
 // DefaultPool is the package-level pool initialized from env vars or a JSON
@@ -41,8 +47,11 @@ func init() {
 		cfg.MaxReaders = defaultWorkers
 	}
 	var f flusher.Flusher = &flusher.DummyFlusher{}
-	if cfg.Flusher == "noop" {
+	switch cfg.Flusher {
+	case "noop":
 		f = flusher.NoopFlusher{}
+	case "s3":
+		f = newS3Flusher(cfg)
 	}
 
 	details := cfg.PoolSize | (cfg.SlotCount << slotCountShift) | (cfg.SlotSize << slotSizeShift)
@@ -52,6 +61,26 @@ func init() {
 	}
 	DefaultPool = p
 	DefaultConfig = cfg
+}
+
+// newS3Flusher builds a flusher.S3Flusher from cfg, resolving AWS credentials
+// and region via the SDK's default credential chain (e.g. an EC2 instance
+// role) unless cfg.S3Region overrides the region explicitly.
+func newS3Flusher(cfg Config) *flusher.S3Flusher {
+	if cfg.S3Bucket == "" {
+		panic("pool: FLUME_FLUSHER=s3 requires FLUME_S3_BUCKET")
+	}
+
+	var opts []func(*awsconfig.LoadOptions) error
+	if cfg.S3Region != "" {
+		opts = append(opts, awsconfig.WithRegion(cfg.S3Region))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	if err != nil {
+		panic("pool: loading AWS config: " + err.Error())
+	}
+
+	return flusher.NewS3Flusher(s3.NewFromConfig(awsCfg), cfg.S3Bucket, cfg.S3Prefix)
 }
 
 // loadConfig resolves configuration from env vars (primary) or a JSON config
@@ -117,6 +146,9 @@ func loadFromEnv() (Config, bool) {
 		MaxWriters: maxWriters,
 		MaxReaders: maxReaders,
 		Flusher:    os.Getenv("FLUME_FLUSHER"),
+		S3Bucket:   os.Getenv("FLUME_S3_BUCKET"),
+		S3Prefix:   os.Getenv("FLUME_S3_PREFIX"),
+		S3Region:   os.Getenv("FLUME_S3_REGION"),
 	}, true
 }
 
